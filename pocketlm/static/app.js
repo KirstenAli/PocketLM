@@ -712,12 +712,14 @@ function ModelsView() {
 
   const addSection = h('section', { style: { marginBottom: '24px' } },
     h('div', { class: 'card' },
-      h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' } },
-        h('span', { html: ICON.download, style: { display: 'inline-flex', color: 'var(--accent)' } }),
-        h('div', { style: { fontWeight: 600, fontSize: '14px' } }, 'Add a model from Hugging Face'),
+      h('div', { style: { display: 'flex', alignItems: 'flex-start', gap: '10px', marginBottom: '10px' } },
+        h('span', { html: ICON.download, style: { display: 'inline-flex', color: 'var(--accent)', marginTop: '1px', flex: '0 0 auto' } }),
+        h('div', { style: { minWidth: 0, flex: 1 } },
+          h('div', { style: { fontWeight: 600, fontSize: '14px', marginBottom: '2px' } }, 'Add a model from Hugging Face'),
+          h('p', { class: 'hint', style: { margin: 0 } },
+            'Any text-generation model on huggingface.co. Paste the repo URL or just the owner/name.'),
+        ),
       ),
-      h('p', { class: 'hint', style: { margin: '0 0 10px' } },
-        'Any text-generation model on huggingface.co. Paste the repo URL or just the owner/name.'),
       h('div', { style: { display: 'flex', gap: '8px' } }, addInput, addBtn),
       addStatus, addProgress,
     ),
@@ -835,6 +837,11 @@ function ModelCard(m, opts = {}) {
         h('div', { class: 'model-title' },
           h('h3', {}, m.display_name),
           fresh ? h('span', { class: 'chip new' }, 'new') : null,
+          // Distinguish models the user pulled in themselves (via the
+          // "Add a model from Hugging Face" panel) from the curated catalog
+          // entries shipped with the app. Shown on every custom card so it
+          // stays meaningful even after the "new" badge has expired.
+          m.custom ? h('span', { class: 'chip custom' }, h('span', { html: ICON.download, style: { display: 'inline-flex' } }), 'user-added') : null,
           m.gated ? h('span', { class: 'chip warn' }, h('span', { html: ICON.lock, style: { display: 'inline-flex' } }), 'gated') : null,
           installed ? h('span', { class: 'chip success' }, h('span', { html: ICON.check, style: { display: 'inline-flex' } }), 'installed') : null,
         ),
@@ -1095,6 +1102,10 @@ function renderSidebar() {
 
 function render() {
   const root = $('#app');
+  // Preserve the .page scroll position across full re-renders so that
+  // actions like "delete model" don't yank the user back to the top.
+  const prevPage = root.querySelector('.page');
+  const prevScroll = prevPage ? prevPage.scrollTop : 0;
   root.innerHTML = '';
   root.appendChild(Sidebar());
   let view;
@@ -1102,6 +1113,10 @@ function render() {
   else if (state.view === 'train') view = TrainView();
   else view = ChatView();
   root.appendChild(view);
+  if (prevScroll) {
+    const newPage = root.querySelector('.page');
+    if (newPage) newPage.scrollTop = prevScroll;
+  }
 }
 
 (async () => {

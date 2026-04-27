@@ -470,9 +470,14 @@ select.input {
 .card {
   background: var(--bg-2); border: 1px solid var(--line);
   border-radius: 14px; padding: 18px; display: flex; flex-direction: column;
-  transition: border-color .15s;
+  transition: border-color .18s ease, box-shadow .18s ease, transform .18s ease, background-color .18s ease;
 }
-.card:hover { border-color: var(--line-2); }
+.card:hover {
+  border-color: rgba(124,140,255,0.55);
+  background: var(--bg-2-hover, var(--bg-2));
+  box-shadow: 0 0 0 1px rgba(124,140,255,0.18), 0 14px 32px -18px var(--accent-glow, rgba(124,140,255,0.45));
+  transform: translateY(-1px);
+}
 .model-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .model-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .model-title h3 { margin: 0; font-size: 15px; font-weight: 600; color: var(--text-strong); }
@@ -487,6 +492,14 @@ select.input {
 }
 .chip.success { background: rgba(74,222,128,0.10); border-color: rgba(74,222,128,0.3); color: var(--good); }
 .chip.warn    { background: rgba(250,204,21,0.10); border-color: rgba(250,204,21,0.3); color: var(--warn); }
+/* "user-added" tag for models pulled in via the Add-from-HF panel,
+   to set them apart from the curated catalog entries. */
+.chip.custom {
+  background: rgba(124,140,255,0.08);
+  border-color: rgba(124,140,255,0.35);
+  color: var(--accent);
+  font-weight: 600;
+}
 /* "new" badge for freshly-downloaded models — uses the brand accent so it
    reads as a positive, attention-pulling tag without screaming. */
 .chip.new {
