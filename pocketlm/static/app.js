@@ -31,6 +31,8 @@ const ICON = {
   lock:    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`,
   spark:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z"/></svg>`,
   upload:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
+  sun:     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>`,
+  moon:    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
 };
 
 // Brand mark — white-on-gradient version of /static/logo.svg, designed to drop
@@ -40,6 +42,45 @@ const LOGO_MARK = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" a
   <circle cx="17.6" cy="5.4" r="1.15" fill="#ffffff" opacity="0.9"/>
 </svg>`;
 const icon = (name) => h('span', { class: 'i', html: ICON[name] || '' });
+
+// ---------------- Theme ----------------
+// `data-theme` is set by an inline script in index.html before first paint to
+// avoid a flash of the wrong palette. We just keep things in sync from here on.
+const THEME_KEY = 'pocketlm.theme';
+function currentTheme() {
+  return document.documentElement.getAttribute('data-theme') === 'light' ? 'light' : 'dark';
+}
+function setTheme(theme) {
+  const t = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', t);
+  try { localStorage.setItem(THEME_KEY, t); } catch {}
+  // Swap highlight.js stylesheet so code blocks read correctly in both modes.
+  const link = document.getElementById('hljs-theme');
+  if (link) {
+    link.href = 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github' +
+                (t === 'light' ? '' : '-dark') + '.min.css';
+  }
+}
+
+function ThemeToggle() {
+  const mk = (mode, iconName, label) => h('button', {
+    type: 'button',
+    class: currentTheme() === mode ? 'active' : '',
+    title: `${label} theme`,
+    'aria-label': `${label} theme`,
+    'aria-pressed': currentTheme() === mode ? 'true' : 'false',
+    onclick: () => {
+      if (currentTheme() === mode) return;
+      setTheme(mode);
+      render();
+    },
+    html: ICON[iconName],
+  });
+  return h('div', { class: 'theme-toggle', role: 'group', 'aria-label': 'Theme' },
+    mk('light', 'sun',  'Light'),
+    mk('dark',  'moon', 'Dark'),
+  );
+}
 
 // ---------------- API ----------------
 const api = {
@@ -518,13 +559,7 @@ function ChatView() {
         ModelPicker(),
       ),
       h('div', { class: 'topbar-meta' },
-        h('div', { class: 'kbd-hint', title: 'Press Enter to send · Shift+Enter for newline' },
-          h('span', { class: 'kbd' }, '⏎'),
-          h('span', {}, 'send'),
-          h('span', { class: 'kbd-sep' }),
-          h('span', { class: 'kbd' }, '⇧⏎'),
-          h('span', {}, 'newline'),
-        ),
+        ThemeToggle(),
       ),
     ),
     messagesEl,
@@ -579,8 +614,11 @@ function ModelsView() {
             h('p', {}, 'Curated, laptop-friendly small models from Hugging Face — plus your own fine-tunes.'),
           ),
           state.device
-            ? h('span', { class: 'device-pill' }, h('span', { class: 'dot' }), `${state.device.device.toUpperCase()} ready`)
-            : null,
+            ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
+                h('span', { class: 'device-pill' }, h('span', { class: 'dot' }), `${state.device.device.toUpperCase()} ready`),
+                ThemeToggle(),
+              )
+            : ThemeToggle(),
         ),
         adapterSection,
         adapters.length ? h('div', { class: 'page-header', style: { marginBottom: '14px' } },
@@ -828,6 +866,7 @@ function TrainView() {
             h('h1', {}, 'Fine-tune a model'),
             h('p', {}, 'LoRA + TRL SFTTrainer. Point at a text/JSONL/CSV file and hit Start.'),
           ),
+          ThemeToggle(),
         ),
         h('div', { class: 'train-grid' },
           h('div', { class: 'card', style: { gap: '14px' } },

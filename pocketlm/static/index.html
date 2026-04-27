@@ -7,10 +7,23 @@
   <link rel="icon" type="image/svg+xml" href="/static/logo.svg">
   <link rel="apple-touch-icon" href="/static/logo.svg">
   <meta name="theme-color" content="#7c8cff">
+  <!-- Theme bootstrap: applied before first paint to avoid any FOUC.
+       Also dynamically injects the matching highlight.js stylesheet. -->
+  <script>
+    (function () {
+      var t = localStorage.getItem('pocketlm.theme') || 'dark';
+      document.documentElement.setAttribute('data-theme', t);
+      var l = document.createElement('link');
+      l.id = 'hljs-theme';
+      l.rel = 'stylesheet';
+      l.href = 'https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github' +
+               (t === 'light' ? '' : '-dark') + '.min.css';
+      document.head.appendChild(l);
+    })();
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css">
   <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.9/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
