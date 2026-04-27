@@ -21,6 +21,71 @@ def _build_prompt(tokenizer, messages: list[dict]) -> str:
     return "\n".join(parts)
 
 
+def _ctx_window(model) -> int:
+    """Return the model's max input length, falling back conservatively."""
+    cfg = getattr(model, "config", None)
+    for attr in ("max_position_embeddings", "n_positions", "seq_length", "max_seq_len"):
+        v = getattr(cfg, attr, None) if cfg else None
+        if isinstance(v, int) and v > 0:
+            return v
+    return 4096
+
+
+def _fit_history(
+    tokenizer,
+    model,
+    messages: list[dict],
+    *,
+    max_new_tokens: int,
+    safety: int = 128,
+) -> list[dict]:
+    """Drop oldest non-system messages until prompt + max_new_tokens fits the
+    model's context window. The system message (if any) is always preserved at
+    index 0; the most recent user message is always preserved even if it alone
+    exceeds the budget (let the tokenizer truncate it rather than dropping the
+    user's actual question)."""
+    ctx = _ctx_window(model)
+    budget = max(256, ctx - max_new_tokens - safety)
+
+    system = [m for m in messages if m["role"] == "system"]
+    rest = [m for m in messages if m["role"] != "system"]
+
+    # Per-message overhead covers role tags / special tokens added by chat templates.
+    PER_MSG_OVERHEAD = 8
+    FRAMING_SLACK = 16  # BOS + generation prompt suffix, etc.
+
+    def msg_tokens(m: dict) -> int:
+        try:
+            return PER_MSG_OVERHEAD + len(
+                tokenizer.encode(m.get("content") or "", add_special_tokens=False)
+            )
+        except Exception:
+            return PER_MSG_OVERHEAD + max(1, len(m.get("content") or "") // 4)
+
+    used = FRAMING_SLACK + sum(msg_tokens(m) for m in system)
+    kept_reversed: list[dict] = []
+    for m in reversed(rest):
+        cost = msg_tokens(m)
+        # Always keep at least the most recent message, even if it busts the budget.
+        if kept_reversed and used + cost > budget:
+            break
+        used += cost
+        kept_reversed.append(m)
+
+    fitted = system + list(reversed(kept_reversed))
+    dropped = len(messages) - len(fitted)
+    if dropped > 0:
+        # Lightweight breadcrumb in server logs — useful when a long chat starts
+        # quietly forgetting old context. Avoid `print` floods on every turn by
+        # only emitting when we actually trimmed.
+        import logging
+        logging.getLogger("pocketlm.inference").info(
+            "history trimmed: dropped=%d kept=%d ctx=%d budget=%d",
+            dropped, len(fitted), ctx, budget,
+        )
+    return fitted
+
+
 async def stream_chat(
     model_id: str,
     messages: list[dict],
@@ -38,6 +103,10 @@ async def stream_chat(
     tokenizer = loaded.tokenizer
     model = loaded.model
     device = loaded.device
+
+    # Trim ancient turns so prompt + max_new_tokens stays within the model's
+    # context window. System prompt and the latest user turn are preserved.
+    messages = _fit_history(tokenizer, model, messages, max_new_tokens=max_new_tokens)
 
     prompt = _build_prompt(tokenizer, messages)
     inputs = tokenizer(prompt, return_tensors="pt").to(device)

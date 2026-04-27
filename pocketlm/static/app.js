@@ -99,12 +99,61 @@ function toast(msg, kind = 'info') {
 marked.setOptions({ breaks: true, gfm: true });
 
 // Run highlight.js on every <pre><code> inside `el`. Idempotent.
+// Strategy: trust the fence tag ONLY if hljs already knows it (it handles all
+// common aliases — js/ts/py/sh/yml/c++/c# — internally). Otherwise auto-detect.
+// Also injects a small header (language label + copy button) on each block.
 function highlightAllIn(el) {
   if (!el || !window.hljs) return;
+
   el.querySelectorAll('pre code').forEach((block) => {
     if (block.dataset.hl === '1') return;
-    try { hljs.highlightElement(block); } catch {}
+
+    const cls = [...block.classList].find(c => c.startsWith('language-'));
+    const fenceLang = cls ? cls.slice('language-'.length).toLowerCase().trim() : '';
+    const known = fenceLang && hljs.getLanguage && hljs.getLanguage(fenceLang);
+    let lang = '';
+
+    try {
+      if (known) {
+        hljs.highlightElement(block);
+        // Resolve aliases to canonical name for the header pill (e.g. "js" → "javascript").
+        lang = (known.name || fenceLang).toLowerCase();
+      } else {
+        const res = hljs.highlightAuto(block.textContent || '');
+        if (res && res.value) {
+          block.innerHTML = res.value;
+          block.classList.add('hljs');
+          lang = (res.language || '').toLowerCase();
+          if (cls) block.classList.remove(cls);
+          if (lang) block.classList.add('language-' + lang);
+        }
+      }
+    } catch {}
     block.dataset.hl = '1';
+
+    // Inject header (language pill + copy). Skip if already present.
+    const pre = block.parentElement;
+    if (pre && pre.tagName === 'PRE' && !pre.querySelector('.code-head')) {
+      const head = h('div', { class: 'code-head' },
+        h('span', { class: 'code-lang' }, lang || 'text'),
+        h('button', {
+          class: 'code-copy',
+          title: 'Copy code',
+          onclick: async (e) => {
+            e.stopPropagation();
+            try {
+              await navigator.clipboard.writeText(block.textContent || '');
+              const btn = e.currentTarget;
+              const prev = btn.textContent;
+              btn.textContent = 'Copied';
+              btn.classList.add('ok');
+              setTimeout(() => { btn.textContent = prev; btn.classList.remove('ok'); }, 1200);
+            } catch { toast('Copy failed', 'error'); }
+          },
+        }, 'Copy'),
+      );
+      pre.insertBefore(head, block);
+    }
   });
 }
 
@@ -124,18 +173,26 @@ const state = {
   installed: [],
   device: null,
   conversations: [],
+  convsExhausted: false,    // no more pages on the server
+  convsLoading: false,
   currentConv: null,
   messages: [],
+  msgsExhausted: false,     // no older messages for current conv
+  msgsLoading: false,
   selectedModel: localStorage.getItem('pocketlm.model') || '',
   generating: false,
   abortCtl: null, // AbortController for the active /api/chat stream
 };
+
+const PAGE_SIZE = 50;
 
 function resetChatState() {
   if (state.abortCtl) { try { state.abortCtl.abort(); } catch {} }
   state.abortCtl = null;
   state.currentConv = null;
   state.messages = [];
+  state.msgsExhausted = false;
+  state.msgsLoading = false;
   state.generating = false;
 }
 
@@ -150,7 +207,28 @@ async function refreshCatalog() {
     localStorage.setItem('pocketlm.model', state.selectedModel);
   }
 }
-async function refreshConversations() { state.conversations = await api.get('/api/conversations'); }
+async function refreshConversations() {
+  // Reset to first page. Used after create/delete/rename or initial load.
+  state.conversations = await api.get(`/api/conversations?limit=${PAGE_SIZE}`);
+  state.convsExhausted = state.conversations.length < PAGE_SIZE;
+  state.convsLoading = false;
+}
+
+async function loadMoreConversations() {
+  if (state.convsLoading || state.convsExhausted) return;
+  const last = state.conversations[state.conversations.length - 1];
+  if (!last) { state.convsExhausted = true; return; }
+  state.convsLoading = true;
+  try {
+    const page = await api.get(`/api/conversations?limit=${PAGE_SIZE}&cursor=${last.id}`);
+    // Dedupe defensively (in case of races with new chats being created).
+    const seen = new Set(state.conversations.map(c => c.id));
+    for (const c of page) if (!seen.has(c.id)) state.conversations.push(c);
+    if (page.length < PAGE_SIZE) state.convsExhausted = true;
+  } finally {
+    state.convsLoading = false;
+  }
+}
 
 // =================================================================
 // SIDEBAR
@@ -160,26 +238,53 @@ function Sidebar() {
     h('div', { class: `nav-item ${state.view === id ? 'active' : ''}`, onclick: () => navigate(id) },
       h('span', { html: ICON[ico] }), label);
 
-  const convList = h('div', { class: 'conv-list' },
-    state.conversations.length === 0
-      ? h('div', { class: 'empty-hint' }, 'No conversations yet.')
-      : state.conversations.map(c => h('div', {
-          class: `conv-item ${state.currentConv?.id === c.id ? 'active' : ''}`,
-          onclick: () => openConversation(c.id),
-        },
-          h('span', { class: 'title' }, c.title || 'Untitled'),
-          h('button', {
-            class: 'del', title: 'Delete',
-            onclick: async (e) => {
-              e.stopPropagation();
-              if (!confirm('Delete this conversation?')) return;
-              await api.del(`/api/conversations/${c.id}`);
-              if (state.currentConv?.id === c.id) resetChatState();
-              await refreshConversations(); render();
-            },
-          }, '×'),
-        ))
+  const convItem = (c) => h('div', {
+    class: `conv-item ${state.currentConv?.id === c.id ? 'active' : ''}`,
+    'data-cid': c.id,
+    onclick: () => openConversation(c.id),
+  },
+    h('span', { class: 'title' }, c.title || 'Untitled'),
+    h('button', {
+      class: 'del', title: 'Delete',
+      onclick: async (e) => {
+        e.stopPropagation();
+        if (!confirm('Delete this conversation?')) return;
+        await api.del(`/api/conversations/${c.id}`);
+        if (state.currentConv?.id === c.id) resetChatState();
+        await refreshConversations(); render();
+      },
+    }, '×'),
   );
+
+  const convList = h('div', { class: 'conv-list' });
+  if (state.conversations.length === 0) {
+    convList.appendChild(h('div', { class: 'empty-hint' }, 'No conversations yet.'));
+  } else {
+    for (const c of state.conversations) convList.appendChild(convItem(c));
+    // Sentinel for infinite scroll. When it scrolls into view, fetch the next page.
+    if (!state.convsExhausted) {
+      const sentinel = h('div', { class: 'scroll-sentinel', 'aria-hidden': 'true' },
+        h('div', { class: 'spinner' }));
+      convList.appendChild(sentinel);
+      // Observe within the convList scroll container.
+      requestAnimationFrame(() => {
+        const io = new IntersectionObserver(async (entries) => {
+          if (!entries.some(e => e.isIntersecting)) return;
+          const before = state.conversations.length;
+          await loadMoreConversations();
+          if (state.conversations.length > before) {
+            // Append the new rows in place — avoids re-rendering the whole sidebar
+            // and losing the user's scroll position.
+            for (let i = before; i < state.conversations.length; i++) {
+              convList.insertBefore(convItem(state.conversations[i]), sentinel);
+            }
+          }
+          if (state.convsExhausted) { io.disconnect(); sentinel.remove(); }
+        }, { root: convList, rootMargin: '120px 0px' });
+        io.observe(sentinel);
+      });
+    }
+  }
 
   return h('aside', { class: 'sidebar' },
     h('div', { class: 'brand' },
@@ -227,12 +332,14 @@ function ModelPicker() {
 
 function ChatView() {
   const messagesEl = h('div', { class: 'messages' });
+  let topSentinel = null;
+  let topObserver = null;
 
   function MessageBubble(m) {
     const isUser = m.role === 'user';
     const md = h('div', { class: 'md ' + (m.streaming ? 'streaming' : '') });
     setMd(md, m.content || '');
-    return h('div', { class: `msg-wrap ${isUser ? 'user' : ''}` },
+    return h('div', { class: `msg-wrap ${isUser ? 'user' : ''}`, 'data-mid': m.id ?? '' },
       h('div', { class: `avatar ${isUser ? 'user' : 'ai'}` }, isUser ? 'You' : 'AI'),
       h('div', { class: 'msg-col' },
         h('div', { class: 'bubble' }, md),
@@ -240,7 +347,64 @@ function ChatView() {
     );
   }
 
+  function detachTopObserver() {
+    if (topObserver) { try { topObserver.disconnect(); } catch {} topObserver = null; }
+    if (topSentinel) { topSentinel.remove(); topSentinel = null; }
+  }
+
+  function attachTopObserver() {
+    detachTopObserver();
+    if (!state.currentConv || state.msgsExhausted || state.messages.length === 0) return;
+    topSentinel = h('div', { class: 'scroll-sentinel top', 'aria-hidden': 'true' },
+      h('div', { class: 'spinner' }));
+    messagesEl.insertBefore(topSentinel, messagesEl.firstChild);
+    topObserver = new IntersectionObserver(async (entries) => {
+      if (!entries.some(e => e.isIntersecting)) return;
+      if (state.msgsLoading || state.msgsExhausted || !state.currentConv) return;
+      const convAtFetch = state.currentConv.id;
+      state.msgsLoading = true;
+
+      // Preserve visual position: remember distance from bottom, restore after prepend.
+      const prevScrollHeight = messagesEl.scrollHeight;
+      const prevScrollTop = messagesEl.scrollTop;
+
+      const oldestId = state.messages[0]?.id;
+      let older = [];
+      try {
+        older = await api.get(`/api/conversations/${convAtFetch}/messages?limit=${PAGE_SIZE}&before=${oldestId}`);
+      } catch (e) {
+        state.msgsLoading = false;
+        return;
+      }
+      // Bail if user switched conversations mid-fetch.
+      if (state.currentConv?.id !== convAtFetch) { state.msgsLoading = false; return; }
+
+      if (older.length < PAGE_SIZE) state.msgsExhausted = true;
+      if (older.length === 0) {
+        detachTopObserver();
+        state.msgsLoading = false;
+        return;
+      }
+
+      // Prepend in DOM and state, in chronological order.
+      const frag = document.createDocumentFragment();
+      for (const m of older) frag.appendChild(MessageBubble(m));
+      const anchor = topSentinel.nextSibling;
+      messagesEl.insertBefore(frag, anchor);
+      state.messages = older.concat(state.messages);
+
+      // Restore scroll so the user's eye stays put.
+      const newScrollHeight = messagesEl.scrollHeight;
+      messagesEl.scrollTop = prevScrollTop + (newScrollHeight - prevScrollHeight);
+
+      state.msgsLoading = false;
+      if (state.msgsExhausted) detachTopObserver();
+    }, { root: messagesEl, rootMargin: '160px 0px 0px 0px' });
+    topObserver.observe(topSentinel);
+  }
+
   function renderMessages() {
+    detachTopObserver();
     messagesEl.innerHTML = '';
     if (!state.currentConv) {
       messagesEl.appendChild(h('div', { class: 'welcome' },
@@ -262,6 +426,8 @@ function ChatView() {
     }
     for (const m of state.messages) messagesEl.appendChild(MessageBubble(m));
     messagesEl.scrollTop = messagesEl.scrollHeight;
+    // Wire up infinite-scroll-up after layout settles.
+    requestAnimationFrame(attachTopObserver);
   }
 
   const input = h('textarea', {
@@ -379,7 +545,9 @@ async function openConversation(id) {
   resetChatState();
   state.currentConv = conv;
   state.selectedModel = conv.model_id || state.selectedModel;
-  state.messages = await api.get(`/api/conversations/${id}/messages`);
+  // Latest page only; older messages stream in as the user scrolls up.
+  state.messages = await api.get(`/api/conversations/${id}/messages?limit=${PAGE_SIZE}`);
+  state.msgsExhausted = state.messages.length < PAGE_SIZE;
   state.view = 'chat';
   render();
 }

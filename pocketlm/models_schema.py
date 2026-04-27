@@ -16,7 +16,7 @@ class Conversation(SQLModel, table=True):
     title: str = "New chat"
     model_id: str
     created_at: datetime = Field(default_factory=_utcnow)
-    updated_at: datetime = Field(default_factory=_utcnow)
+    updated_at: datetime = Field(default_factory=_utcnow, index=True)
 
 
 class Message(SQLModel, table=True):
