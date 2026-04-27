@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from pathlib import Path
 from typing import AsyncIterator
@@ -17,6 +18,37 @@ def _safe_dirname(repo_id: str) -> str:
 
 def local_path_for(repo_id: str) -> Path:
     return MODELS_DIR / _safe_dirname(repo_id)
+
+
+_VALID_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
+def normalize_repo_id(raw: str) -> str:
+    """Accept any of:
+        - "owner/name"
+        - "https://huggingface.co/owner/name"
+        - "https://huggingface.co/owner/name/tree/main"
+        - "huggingface.co/owner/name"
+    Returns a canonical "owner/name" or raises ValueError.
+    """
+    s = (raw or "").strip()
+    if not s:
+        raise ValueError("Empty repo id")
+    # Strip protocol + host
+    if "huggingface.co" in s:
+        s = s.split("huggingface.co/", 1)[-1]
+    # Drop query / fragment
+    s = s.split("?", 1)[0].split("#", 1)[0]
+    # Drop /tree/<ref>, /blob/<ref>, /resolve/<ref> suffixes
+    for sep in ("/tree/", "/blob/", "/resolve/", "/commits/"):
+        s = s.split(sep, 1)[0]
+    s = s.strip().strip("/")
+    if not _VALID_REPO_RE.match(s):
+        raise ValueError(
+            f"Not a valid Hugging Face model id: {raw!r}. "
+            "Expected 'owner/name' or a huggingface.co URL."
+        )
+    return s
 
 
 def _friendly_error(repo_id: str, exc: Exception) -> str:

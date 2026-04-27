@@ -7,34 +7,42 @@ import shutil
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
-from ..catalog import get as catalog_get
 from ..db import session_scope
 from ..models_schema import ModelRecord
 from ..schemas import DownloadRequest
-from ..services.downloader import folder_size, local_path_for, stream_download
+from ..services.downloader import (
+    folder_size,
+    local_path_for,
+    normalize_repo_id,
+    stream_download,
+)
 
 router = APIRouter()
 
 
 @router.post("/models/download")
 async def download_model(req: DownloadRequest):
-    if not catalog_get(req.repo_id):
-        raise HTTPException(404, f"Unknown model: {req.repo_id}")
+    # Accept any HF repo (curated or arbitrary). The catalog router will
+    # surface installed-but-not-curated repos as "custom" cards.
+    try:
+        repo_id = normalize_repo_id(req.repo_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
     async def gen():
         final_path = None
-        async for evt in stream_download(req.repo_id):
+        async for evt in stream_download(repo_id):
             if evt["event"] == "done":
                 final_path = evt["path"]
             yield {"data": json.dumps(evt)}
 
         if final_path:
-            size = folder_size(local_path_for(req.repo_id))
+            size = folder_size(local_path_for(repo_id))
             with session_scope() as s:
-                rec = s.get(ModelRecord, req.repo_id)
+                rec = s.get(ModelRecord, repo_id)
                 if rec is None:
                     rec = ModelRecord(
-                        repo_id=req.repo_id,
+                        repo_id=repo_id,
                         local_path=final_path,
                         size_bytes=size,
                         status="ready",
@@ -45,7 +53,7 @@ async def download_model(req: DownloadRequest):
                     rec.status = "ready"
                 s.add(rec)
                 s.commit()
-            yield {"data": json.dumps({"event": "saved", "size_bytes": size})}
+            yield {"data": json.dumps({"event": "saved", "size_bytes": size, "repo_id": repo_id})}
 
     return EventSourceResponse(gen())
 

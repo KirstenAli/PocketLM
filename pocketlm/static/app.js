@@ -595,6 +595,59 @@ function ModelsView() {
   const grid = h('div', { class: 'grid-3' });
   for (const m of state.catalog) grid.appendChild(ModelCard(m));
 
+  // ---- Add-from-Hugging-Face panel ------------------------------
+  const addInput = h('input', {
+    class: 'input',
+    placeholder: 'Paste a Hugging Face URL or owner/name (e.g. Qwen/Qwen2.5-0.5B-Instruct)',
+    onkeydown: (e) => { if (e.key === 'Enter') { e.preventDefault(); addBtn.click(); } },
+  });
+  const addBtn = h('button', { class: 'btn btn-primary', type: 'button' },
+    h('span', { html: ICON.plus }), 'Add');
+  const addStatus = h('div', { class: 'progress-text', style: { display: 'none', marginTop: '10px' } }, '');
+  const addProgress = h('div', { class: 'progress', style: { display: 'none', marginTop: '8px' } }, h('div'));
+
+  addBtn.onclick = async () => {
+    const raw = addInput.value.trim();
+    if (!raw) { toast('Paste a Hugging Face URL or repo id', 'error'); addInput.focus(); return; }
+    addBtn.disabled = true; addInput.disabled = true;
+    addStatus.style.display = 'block'; addProgress.style.display = 'block';
+    addStatus.textContent = 'Connecting to Hugging Face…';
+    let ok = false;
+    try {
+      for await (const evt of api.stream('/api/models/download', { repo_id: raw })) {
+        if (evt.event === 'start')    addStatus.textContent = `Downloading ${evt.repo_id || raw}…`;
+        if (evt.event === 'progress') addStatus.textContent = evt.message;
+        if (evt.event === 'done')     addStatus.textContent = 'Finalizing…';
+        if (evt.event === 'saved')    addStatus.textContent = `Saved (${(evt.size_bytes/1e9).toFixed(2)} GB)`;
+        if (evt.event === 'error')    { toast(evt.message, 'error'); throw new Error(evt.message); }
+      }
+      ok = true;
+      addInput.value = '';
+      toast('Model added', 'success');
+      await refreshCatalog(); render();
+    } catch (e) {
+      if (!ok) toast(e.message || 'Add failed', 'error');
+    } finally {
+      addBtn.disabled = false; addInput.disabled = false;
+      addProgress.style.display = 'none';
+      if (!ok) addStatus.textContent = '';
+    }
+  };
+
+  const addSection = h('section', { style: { marginBottom: '24px' } },
+    h('div', { class: 'card' },
+      h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' } },
+        h('span', { html: ICON.download, style: { display: 'inline-flex', color: 'var(--accent)' } }),
+        h('div', { style: { fontWeight: 600, fontSize: '14px' } }, 'Add a model from Hugging Face'),
+      ),
+      h('p', { class: 'hint', style: { margin: '0 0 10px' } },
+        'Any text-generation model on huggingface.co. Paste the repo URL or just the owner/name.'),
+      h('div', { style: { display: 'flex', gap: '8px' } }, addInput, addBtn),
+      addStatus, addProgress,
+    ),
+  );
+  // ---------------------------------------------------------------
+
   const adapterSection = adapters.length === 0 ? null : h('section', { style: { marginBottom: '32px' } },
     h('div', { class: 'page-header', style: { marginBottom: '14px' } },
       h('div', {},
@@ -620,6 +673,7 @@ function ModelsView() {
               )
             : ThemeToggle(),
         ),
+        addSection,
         adapterSection,
         adapters.length ? h('div', { class: 'page-header', style: { marginBottom: '14px' } },
           h('div', {}, h('h1', { style: { fontSize: '17px' } }, 'Catalog')),
@@ -703,6 +757,7 @@ function ModelCard(m) {
         h('div', { class: 'model-title' },
           h('h3', {}, m.display_name),
           m.gated ? h('span', { class: 'chip warn' }, h('span', { html: ICON.lock, style: { display: 'inline-flex' } }), 'gated') : null,
+          m.custom ? h('span', { class: 'chip' }, 'custom') : null,
           installed ? h('span', { class: 'chip success' }, h('span', { html: ICON.check, style: { display: 'inline-flex' } }), 'installed') : null,
         ),
         h('div', { class: 'model-repo' }, m.repo_id),
@@ -711,10 +766,10 @@ function ModelCard(m) {
     ),
     h('p', { class: 'model-desc' }, m.description),
     h('div', { class: 'chips' },
-      h('span', { class: 'chip' }, `${m.params_b}B params`),
-      h('span', { class: 'chip' }, `${m.min_ram_gb} GB RAM+`),
-      h('span', { class: 'chip' }, `${(m.context/1024).toFixed(0)}k ctx`),
-      h('span', { class: 'chip' }, m.family),
+      m.params_b   ? h('span', { class: 'chip' }, `${m.custom ? '≈' : ''}${m.params_b}B params`) : null,
+      m.min_ram_gb ? h('span', { class: 'chip' }, `${m.min_ram_gb} GB RAM+`) : null,
+      m.context    ? h('span', { class: 'chip' }, `${(m.context/1024).toFixed(0)}k ctx`) : null,
+      m.family     ? h('span', { class: 'chip' }, m.family) : null,
     ),
     progress, progressText,
   );
