@@ -32,6 +32,13 @@ const ICON = {
   spark:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l2.4 6.6L21 11l-6.6 2.4L12 20l-2.4-6.6L3 11l6.6-2.4z"/></svg>`,
   upload:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
 };
+
+// Brand mark — white-on-gradient version of /static/logo.svg, designed to drop
+// inside an already-gradient container (.brand-mark, .welcome-mark).
+const LOGO_MARK = `<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <path d="M12 3 L13.4 9.6 L20 11 L13.4 12.4 L12 19 L10.6 12.4 L4 11 L10.6 9.6 Z" fill="#ffffff"/>
+  <circle cx="17.6" cy="5.4" r="1.15" fill="#ffffff" opacity="0.9"/>
+</svg>`;
 const icon = (name) => h('span', { class: 'i', html: ICON[name] || '' });
 
 // ---------------- API ----------------
@@ -176,7 +183,7 @@ function Sidebar() {
 
   return h('aside', { class: 'sidebar' },
     h('div', { class: 'brand' },
-      h('div', { class: 'brand-mark' }, 'P'),
+      h('div', { class: 'brand-mark', html: LOGO_MARK }),
       h('div', {},
         h('div', { class: 'brand-name' }, 'PocketLM'),
         h('div', { class: 'brand-sub' },
@@ -237,7 +244,7 @@ function ChatView() {
     messagesEl.innerHTML = '';
     if (!state.currentConv) {
       messagesEl.appendChild(h('div', { class: 'welcome' },
-        h('div', { class: 'welcome-mark' }, '✦'),
+        h('div', { class: 'welcome-mark', html: LOGO_MARK }),
         h('h1', {}, 'Welcome to PocketLM'),
         h('p', {}, 'Pick a model and start chatting — or train your own from any text file.'),
         h('div', { class: 'welcome-grid' },
@@ -345,8 +352,13 @@ function ChatView() {
         ModelPicker(),
       ),
       h('div', { class: 'topbar-meta' },
-        h('span', { class: 'kbd' }, '⏎'), 'send',
-        h('span', { class: 'kbd' }, '⇧⏎'), 'newline',
+        h('div', { class: 'kbd-hint', title: 'Press Enter to send · Shift+Enter for newline' },
+          h('span', { class: 'kbd' }, '⏎'),
+          h('span', {}, 'send'),
+          h('span', { class: 'kbd-sep' }),
+          h('span', { class: 'kbd' }, '⇧⏎'),
+          h('span', {}, 'newline'),
+        ),
       ),
     ),
     messagesEl,
