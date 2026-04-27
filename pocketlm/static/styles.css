@@ -487,6 +487,18 @@ select.input {
 }
 .chip.success { background: rgba(74,222,128,0.10); border-color: rgba(74,222,128,0.3); color: var(--good); }
 .chip.warn    { background: rgba(250,204,21,0.10); border-color: rgba(250,204,21,0.3); color: var(--warn); }
+/* "new" badge for freshly-downloaded models — uses the brand accent so it
+   reads as a positive, attention-pulling tag without screaming. */
+.chip.new {
+  background: linear-gradient(135deg, rgba(124,140,255,0.18), rgba(157,124,255,0.18));
+  border-color: rgba(124,140,255,0.45);
+  color: var(--accent);
+  font-weight: 600; letter-spacing: 0.04em; text-transform: uppercase; font-size: 10px;
+}
+.card.fresh {
+  border-color: rgba(124,140,255,0.45);
+  box-shadow: 0 0 0 1px rgba(124,140,255,0.18), 0 8px 28px -14px var(--accent-glow);
+}
 
 .progress { margin-top: 12px; height: 4px; border-radius: 999px; background: var(--bg-3); overflow: hidden; position: relative; }
 .progress > div { position: absolute; inset: 0; background: linear-gradient(90deg, transparent, var(--accent), transparent); animation: shimmer 1.6s linear infinite; }

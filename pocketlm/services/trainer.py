@@ -124,6 +124,11 @@ async def run_training(req: TrainRequest) -> AsyncIterator[dict]:
                 sft_cfg = SFTConfig(max_seq_length=req.max_seq_len, **sft_cfg_kwargs)
 
             class StreamCb(TrainerCallback):
+                # Track the last step we surfaced so we can dedupe the
+                # extra `on_log` HF/TRL fires at the end of an epoch / at
+                # train-end for the same global_step (often with loss=0.0).
+                _last_step = -1
+
                 def on_train_begin(self, args, state, control, **kwargs):
                     total = state.max_steps or 0
                     emit({"event": "begin", "total_steps": total})
@@ -137,8 +142,26 @@ async def run_training(req: TrainRequest) -> AsyncIterator[dict]:
                 def on_log(self, args, state, control, logs=None, **kwargs):
                     if not logs:
                         return
-                    loss = float(logs.get("loss", 0.0))
+                    # HF's Trainer fires `on_log` a few extra times that we
+                    # don't want to surface as training samples:
+                    #  • final summary log (has `train_runtime`/`train_loss`
+                    #    but no plain `loss`) → filtered by the `"loss" not
+                    #    in logs` guard below.
+                    #  • end-of-epoch / end-of-train log at the same
+                    #    global_step as the last real step, often with
+                    #    `loss=0.0` → filtered by the dedupe + zero guard.
+                    # Without these guards the frontend ends up with a
+                    # phantom `step N: loss=0.0000` row that also crushes
+                    # the auto-scaled loss chart.
+                    if "loss" not in logs:
+                        return
+                    loss = float(logs["loss"])
                     step = int(state.global_step)
+                    if step <= self._last_step:
+                        return
+                    if loss == 0.0:
+                        return
+                    self._last_step = step
                     emit(
                         {
                             "event": "step",

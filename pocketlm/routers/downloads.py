@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 from sse_starlette.sse import EventSourceResponse
@@ -38,6 +39,7 @@ async def download_model(req: DownloadRequest):
 
         if final_path:
             size = folder_size(local_path_for(repo_id))
+            now = datetime.utcnow()
             with session_scope() as s:
                 rec = s.get(ModelRecord, repo_id)
                 if rec is None:
@@ -51,9 +53,17 @@ async def download_model(req: DownloadRequest):
                     rec.local_path = final_path
                     rec.size_bytes = size
                     rec.status = "ready"
+                # Always bump downloaded_at on a successful (re)install so the
+                # UI can surface the freshly added model as "new".
+                rec.downloaded_at = now
                 s.add(rec)
                 s.commit()
-            yield {"data": json.dumps({"event": "saved", "size_bytes": size, "repo_id": repo_id})}
+            yield {"data": json.dumps({
+                "event": "saved",
+                "size_bytes": size,
+                "repo_id": repo_id,
+                "downloaded_at": now.isoformat(),
+            })}
 
     return EventSourceResponse(gen())
 

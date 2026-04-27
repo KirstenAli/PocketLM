@@ -70,6 +70,7 @@ def _custom_card(rec: ModelRecord) -> dict:
         "description": f"Added from Hugging Face. {size_mb} MB on disk.",
         "installed": True,
         "custom": True,
+        "downloaded_at": rec.downloaded_at.isoformat() if rec.downloaded_at else None,
     }
 
 
@@ -81,10 +82,12 @@ def get_catalog() -> dict:
         installed_recs = {r.repo_id: r for r in s.exec(select(ModelRecord)).all()}
     for m in CATALOG:
         d = m.to_dict()
+        rec = installed_recs.get(m.repo_id)
         # Only trust the DB. Stale/empty folders from failed downloads
         # should NOT be counted as installed.
-        d["installed"] = m.repo_id in installed_recs
+        d["installed"] = rec is not None
         d["custom"] = False
+        d["downloaded_at"] = rec.downloaded_at.isoformat() if (rec and rec.downloaded_at) else None
         items.append(d)
     # Surface user-added (non-curated) installed models as custom cards.
     for rid, rec in installed_recs.items():

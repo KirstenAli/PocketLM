@@ -396,6 +396,11 @@ function ChatView() {
   function attachTopObserver() {
     detachTopObserver();
     if (!state.currentConv || state.msgsExhausted || state.messages.length === 0) return;
+    // Locally-pushed messages (e.g. the user's first message in a brand-new
+    // chat) don't have an `id` until the server persists them. Without an id
+    // we can't paginate older messages, and there are by definition none, so
+    // skip the sentinel entirely instead of firing 422s in a loop.
+    if (state.messages[0]?.id == null) { state.msgsExhausted = true; return; }
     topSentinel = h('div', { class: 'scroll-sentinel top', 'aria-hidden': 'true' },
       h('div', { class: 'spinner' }));
     messagesEl.insertBefore(topSentinel, messagesEl.firstChild);
@@ -592,8 +597,79 @@ async function openConversation(id) {
 // =================================================================
 function ModelsView() {
   const adapters = state.installed.filter(m => m.type === 'adapter');
+  // "New" badge window — anything downloaded within the last NEW_WINDOW_MS
+  // floats to the top of the grid and is rendered with a `new` chip. The
+  // chip fades out automatically: a quiet timer re-renders the page once
+  // the window expires for the most recent install.
+  const NEW_WINDOW_MS = 10 * 60 * 1000;
+  const now = Date.now();
+  const dlMs = (m) => m.downloaded_at ? Date.parse(m.downloaded_at + 'Z') : 0;
+  const isNew = (m) => m.installed && dlMs(m) > 0 && (now - dlMs(m)) < NEW_WINDOW_MS;
+
+  const sorted = state.catalog.slice().sort((a, b) => {
+    // 1) Anything freshly downloaded floats to the very top, newest first
+    //    (covers both curated and custom — that's the "new" badge tier).
+    const an = isNew(a), bn = isNew(b);
+    if (an !== bn) return an ? -1 : 1;
+    if (an && bn)  return dlMs(b) - dlMs(a);
+    // 2) User-added (custom) installed models always sit above the curated
+    //    catalog, newest install first.
+    const ac = !!a.custom, bc = !!b.custom;
+    if (ac !== bc) return ac ? -1 : 1;
+    if (ac && bc)  return dlMs(b) - dlMs(a);
+    // 3) Curated entries keep their declared order from catalog.py.
+    return 0;
+  });
+
+  // ---- Grid with seamless infinite scroll ------------------------
+  // The /api/catalog endpoint returns the whole list (small-to-medium), so
+  // this is a pure client-side mount-as-you-scroll pattern: keeps the DOM
+  // light when many custom models accumulate, and stays smooth on resort.
+  const GRID_PAGE = 12;
   const grid = h('div', { class: 'grid-3' });
-  for (const m of state.catalog) grid.appendChild(ModelCard(m));
+  let renderedCount = 0;
+  let gridSentinel = null;
+  let gridObserver = null;
+  const appendBatch = () => {
+    const next = sorted.slice(renderedCount, renderedCount + GRID_PAGE);
+    for (const m of next) grid.appendChild(ModelCard(m, { fresh: isNew(m) }));
+    renderedCount += next.length;
+    if (renderedCount >= sorted.length) {
+      if (gridObserver) { gridObserver.disconnect(); gridObserver = null; }
+      if (gridSentinel) { gridSentinel.remove(); gridSentinel = null; }
+    }
+  };
+  appendBatch();   // first page before mount → no flash
+
+  if (renderedCount < sorted.length) {
+    gridSentinel = h('div', { class: 'scroll-sentinel', 'aria-hidden': 'true' },
+      h('div', { class: 'spinner' }));
+  }
+
+  // Stand up the IntersectionObserver after the grid+sentinel are in the
+  // DOM. Root is the scrolling .page container; rootMargin pre-loads the
+  // next batch ~200px before the user actually hits the bottom.
+  setTimeout(() => {
+    if (!gridSentinel || gridObserver) return;
+    const root = grid.closest('.page') || null;
+    gridObserver = new IntersectionObserver((entries) => {
+      if (entries.some((e) => e.isIntersecting)) appendBatch();
+    }, { root, rootMargin: '200px 0px' });
+    gridObserver.observe(gridSentinel);
+  }, 0);
+  // ----------------------------------------------------------------
+
+  // Schedule a one-shot re-render to drop the badge as soon as it expires
+  // for the most-recently-installed model. Cleared if the user navigates away.
+  if (state._newBadgeTimer) { clearTimeout(state._newBadgeTimer); state._newBadgeTimer = null; }
+  const newest = sorted.find(isNew);
+  if (newest) {
+    const remaining = NEW_WINDOW_MS - (now - dlMs(newest)) + 250;
+    state._newBadgeTimer = setTimeout(() => {
+      state._newBadgeTimer = null;
+      if (state.view === 'models') render();
+    }, Math.max(1000, remaining));
+  }
 
   // ---- Add-from-Hugging-Face panel ------------------------------
   const addInput = h('input', {
@@ -664,7 +740,7 @@ function ModelsView() {
         h('div', { class: 'page-header' },
           h('div', {},
             h('h1', {}, 'Models'),
-            h('p', {}, 'Curated, laptop-friendly small models from Hugging Face — plus your own fine-tunes.'),
+            h('p', {}, 'Add any model from Hugging Face or chat with your fine-tunes — all running locally.'),
           ),
           state.device
             ? h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } },
@@ -679,6 +755,7 @@ function ModelsView() {
           h('div', {}, h('h1', { style: { fontSize: '17px' } }, 'Catalog')),
         ) : null,
         grid,
+        gridSentinel,
       ),
     ),
   );
@@ -733,8 +810,9 @@ function AdapterCard(m) {
   );
 }
 
-function ModelCard(m) {
+function ModelCard(m, opts = {}) {
   const installed = m.installed;
+  const fresh = !!opts.fresh;
   const action = installed
     ? h('button', {
         class: 'btn btn-outline',
@@ -751,13 +829,13 @@ function ModelCard(m) {
   const progress = h('div', { class: 'progress', style: { display: 'none' } }, h('div'));
   const progressText = h('div', { class: 'progress-text', style: { display: 'none' } }, '');
 
-  return h('div', { class: 'card' },
+  return h('div', { class: 'card' + (fresh ? ' fresh' : '') },
     h('div', { class: 'model-head' },
       h('div', { style: { minWidth: 0, flex: 1 } },
         h('div', { class: 'model-title' },
           h('h3', {}, m.display_name),
+          fresh ? h('span', { class: 'chip new' }, 'new') : null,
           m.gated ? h('span', { class: 'chip warn' }, h('span', { html: ICON.lock, style: { display: 'inline-flex' } }), 'gated') : null,
-          m.custom ? h('span', { class: 'chip' }, 'custom') : null,
           installed ? h('span', { class: 'chip success' }, h('span', { html: ICON.check, style: { display: 'inline-flex' } }), 'installed') : null,
         ),
         h('div', { class: 'model-repo' }, m.repo_id),
@@ -840,28 +918,77 @@ function TrainView() {
 
   function drawLoss() {
     const ctx = canvas.getContext('2d');
-    const W = canvas.width = canvas.clientWidth * window.devicePixelRatio;
-    const H = canvas.height = 160 * window.devicePixelRatio;
-    ctx.scale(1,1);
-    ctx.clearRect(0,0,W,H);
-    if (losses.length < 2) return;
-    const min = Math.min(...losses), max = Math.max(...losses);
-    const pad = 16 * window.devicePixelRatio;
-    const grad2 = ctx.createLinearGradient(0,0,W,0);
-    grad2.addColorStop(0, '#7c8cff'); grad2.addColorStop(1, '#9d7cff');
-    ctx.strokeStyle = grad2; ctx.lineWidth = 2 * window.devicePixelRatio; ctx.beginPath();
-    losses.forEach((v, i) => {
-      const x = pad + (W - 2*pad) * (i/(losses.length-1));
-      const y = H - pad - (H-2*pad) * ((v-min)/((max-min)||1));
-      i === 0 ? ctx.moveTo(x,y) : ctx.lineTo(x,y);
-    });
+    const dpr = window.devicePixelRatio || 1;
+    const W = canvas.width = canvas.clientWidth * dpr;
+    const H = canvas.height = 160 * dpr;
+    ctx.clearRect(0, 0, W, H);
+    if (losses.length < 1) return;
+    const pad = 16 * dpr;
+
+    // Stable y-axis: anchor to [0, initial_loss] (with a touch of headroom
+    // in case loss spikes above the starting point). This stops the chart
+    // from rescaling on every new point — early steps no longer look like
+    // a perfect diagonal just because the window is tiny.
+    const initial = losses[0];
+    const observedMax = Math.max(...losses);
+    const yMax = Math.max(initial, observedMax) * 1.05;
+    const yMin = 0;
+    const xAt = (i) => pad + (W - 2 * pad) * (losses.length === 1 ? 0.5 : i / (losses.length - 1));
+    const yAt = (v) => H - pad - (H - 2 * pad) * ((v - yMin) / ((yMax - yMin) || 1));
+
+    // Faint baseline at y=0 for context.
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.lineWidth = 1 * dpr;
+    ctx.beginPath();
+    ctx.moveTo(pad, H - pad);
+    ctx.lineTo(W - pad, H - pad);
     ctx.stroke();
+
+    // Raw loss line (gradient).
+    if (losses.length >= 2) {
+      const grad2 = ctx.createLinearGradient(0, 0, W, 0);
+      grad2.addColorStop(0, '#7c8cff');
+      grad2.addColorStop(1, '#9d7cff');
+      ctx.strokeStyle = grad2;
+      ctx.lineWidth = 2 * dpr;
+      ctx.beginPath();
+      losses.forEach((v, i) => {
+        const x = xAt(i), y = yAt(v);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+    }
+
+    // Point markers.
     ctx.fillStyle = '#9d7cff';
     losses.forEach((v, i) => {
-      const x = pad + (W - 2*pad) * (i/(losses.length-1));
-      const y = H - pad - (H-2*pad) * ((v-min)/((max-min)||1));
-      ctx.beginPath(); ctx.arc(x,y, 2.5*window.devicePixelRatio, 0, Math.PI*2); ctx.fill();
+      ctx.beginPath();
+      ctx.arc(xAt(i), yAt(v), 2.5 * dpr, 0, Math.PI * 2);
+      ctx.fill();
     });
+
+    // Smoothed trend line (centered moving average) — emphasises the
+    // underlying decrease through the per-batch noise.
+    if (losses.length >= 4) {
+      const win = Math.max(3, Math.min(9, Math.round(losses.length / 4)));
+      const half = Math.floor(win / 2);
+      const smooth = losses.map((_, i) => {
+        const a = Math.max(0, i - half);
+        const b = Math.min(losses.length, i + half + 1);
+        let s = 0; for (let k = a; k < b; k++) s += losses[k];
+        return s / (b - a);
+      });
+      ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+      ctx.lineWidth = 1.5 * dpr;
+      ctx.setLineDash([4 * dpr, 4 * dpr]);
+      ctx.beginPath();
+      smooth.forEach((v, i) => {
+        const x = xAt(i), y = yAt(v);
+        i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
   }
 
   const startBtn = h('button', { class: 'btn btn-primary', onclick: startTraining },
