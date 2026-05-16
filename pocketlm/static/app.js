@@ -214,6 +214,7 @@ function setMd(el, text, highlight = true) {
 // --------------- State ---------------
 const state = {
   view: 'chat',
+  chatMode: localStorage.getItem('pocketlm.chatmode') || 'chat',
   catalog: [],
   catalogTotal: 0,
   catalogOffset: 0,
@@ -383,7 +384,6 @@ function Sidebar() {
       navItem('chat',     'Chat',      'chat'),
       navItem('models',   'Models',    'models'),
       navItem('train',    'Fine-tune', 'train'),
-      navItem('agent',    'Agent',     'agent'),
       navItem('settings', 'Settings',  'settings'),
     ),
     h('button', { class: 'new-chat-btn', onclick: newChat },
@@ -578,6 +578,7 @@ function ChatView() {
   }
 
   function attachTopObserver() {
+    if (state.chatMode === 'agent') return;
     detachTopObserver();
     if (!state.currentConv || state.msgsExhausted || state.messages.length === 0) return;
     // Locally-pushed messages (e.g. the user's first message in a brand-new
@@ -636,7 +637,15 @@ function ChatView() {
   function renderMessages() {
     detachTopObserver();
     messagesEl.innerHTML = '';
-    if (!state.currentConv) {
+    if (state.chatMode === 'agent' && state.agentMessages.length === 0) {
+      messagesEl.appendChild(h('div', { class: 'welcome' },
+        h('div', { class: 'welcome-mark', html: LOGO_MARK }),
+        h('h1', {}, 'Agent mode'),
+        h('p', {}, 'Use your local model with MCP tools. Select one or more enabled MCP servers first.'),
+      ));
+      return;
+    }
+    if (state.chatMode !== 'agent' && !state.currentConv) {
       messagesEl.appendChild(h('div', { class: 'welcome' },
         h('div', { class: 'welcome-mark', html: LOGO_MARK }),
         h('h1', {}, 'Welcome to PocketLM'),
@@ -654,10 +663,11 @@ function ChatView() {
       ));
       return;
     }
-    for (const m of state.messages) messagesEl.appendChild(MessageBubble(m));
+    const source = state.chatMode === 'agent' ? state.agentMessages : state.messages;
+    for (const m of source) messagesEl.appendChild(MessageBubble(m));
     messagesEl.scrollTop = messagesEl.scrollHeight;
     // Wire up infinite-scroll-up after layout settles.
-    requestAnimationFrame(attachTopObserver);
+    if (state.chatMode !== 'agent') requestAnimationFrame(attachTopObserver);
   }
 
   const input = h('textarea', {
@@ -686,6 +696,7 @@ function ChatView() {
   }
 
   async function sendMessage() {
+    if (state.chatMode === 'agent') return sendAgentMessage();
     const text = input.value.trim();
     if (!text || state.generating) return;
     if (!state.selectedModel) { toast('Pick a model first', 'error'); return; }
@@ -746,10 +757,116 @@ function ChatView() {
     }
   }
 
+  async function sendAgentMessage() {
+    const text = input.value.trim();
+    if (!text || state.generating) return;
+    if (!state.selectedModel) { toast('Pick a model first', 'error'); return; }
+    await ensureMCPServersLoaded();
+    const serverIds = state.mcpServers
+      .filter(s => state.agentSelectedServerIds.includes(s.id) && s.enabled)
+      .map(s => s.id);
+    if (serverIds.length === 0) { toast('Select at least one enabled MCP server', 'error'); return; }
+
+    state.agentMessages.push({ role: 'user', content: text });
+    const assistant = { role: 'assistant', content: '', streaming: true };
+    state.agentMessages.push(assistant);
+    input.value = ''; input.style.height = 'auto';
+    state.generating = true; sendBtn.disabled = false;
+    state.abortCtl = new AbortController();
+    setSendBtn('stop');
+    renderMessages();
+
+    const cfg = chatCfgPayload(getChatCfg(null));
+    try {
+      for await (const evt of api.stream('/api/agent/chat', {
+        model_id: state.selectedModel,
+        message: text,
+        server_ids: serverIds,
+        temperature: cfg.temperature,
+        top_p: cfg.top_p,
+        max_new_tokens: cfg.max_new_tokens,
+        system_prompt: cfg.system_prompt,
+      }, { signal: state.abortCtl.signal })) {
+        if (evt.event === 'token') {
+          assistant.content += evt.text;
+        } else if (evt.event === 'tool_call') {
+          assistant.content += `\n\n\`\`\`json\n[tool_call] ${JSON.stringify({ name: evt.name, arguments: evt.arguments || {} }, null, 2)}\n\`\`\``;
+        } else if (evt.event === 'tool_result') {
+          assistant.content += `\n\n\`\`\`json\n[tool_result] ${JSON.stringify({ name: evt.name, result: evt.result || [] }, null, 2)}\n\`\`\``;
+        } else if (evt.event === 'tool_error') {
+          assistant.content += `\n\n*Tool error (${evt.server_name || 'server'}): ${evt.error || 'unknown'}*`;
+        } else if (evt.event === 'error') {
+          toast(evt.message, 'error');
+          assistant.content += `\n\n*Error: ${evt.message}*`;
+        }
+        const bubbles = messagesEl.querySelectorAll('.md');
+        const last = bubbles[bubbles.length - 1];
+        if (last) {
+          setMd(last, assistant.content, false);
+          last.classList.add('streaming');
+        }
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') toast(e.message, 'error');
+    } finally {
+      assistant.streaming = false;
+      state.generating = false;
+      state.abortCtl = null;
+      setSendBtn('send');
+      renderMessages();
+    }
+  }
+
   setTimeout(renderMessages, 0);
 
   // Generation-controls drawer (per-conversation; falls back to defaults for new chats).
   const drawer = ChatControlsDrawer(state.currentConv?.id);
+  const modeSel = h('select', {
+    class: 'input',
+    style: { width: 'auto', minWidth: '130px' },
+    onchange: async (e) => {
+      state.chatMode = e.target.value;
+      try { localStorage.setItem('pocketlm.chatmode', state.chatMode); } catch {}
+      if (state.chatMode === 'agent') await ensureMCPServersLoaded();
+      render();
+    },
+  },
+    h('option', { value: 'chat', selected: state.chatMode === 'chat' ? '' : false }, 'Chat mode'),
+    h('option', { value: 'agent', selected: state.chatMode === 'agent' ? '' : false }, 'Agent mode'),
+  );
+
+  const mcpBtn = h('button', {
+    class: 'btn btn-outline',
+    style: { display: state.chatMode === 'agent' ? '' : 'none' },
+    onclick: async () => {
+      await ensureMCPServersLoaded();
+      const rows = state.mcpServers.map((srv) => {
+        const cb = h('input', { type: 'checkbox' });
+        cb.checked = state.agentSelectedServerIds.includes(srv.id);
+        cb.disabled = !srv.enabled;
+        cb.onchange = () => {
+          if (cb.checked) {
+            if (!state.agentSelectedServerIds.includes(srv.id)) state.agentSelectedServerIds.push(srv.id);
+          } else {
+            state.agentSelectedServerIds = state.agentSelectedServerIds.filter(x => x !== srv.id);
+          }
+        };
+        return h('label', { style: { display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' } },
+          cb,
+          h('span', {}, `${srv.name} ${srv.enabled ? '' : '(disabled)'}`),
+        );
+      });
+      showModal({
+        title: 'Select MCP servers',
+        body: rows.length ? h('div', {}, ...rows) : h('p', { class: 'hint' }, 'No MCP servers yet. Configure one in Settings.'),
+        actions: [
+          { label: 'Open Settings', kind: 'btn-outline', onclick: () => navigate('settings') },
+          { label: 'Done', kind: 'btn-primary' },
+        ],
+      });
+    },
+  }, `Servers (${state.agentSelectedServerIds.length})`);
   const slidersBtn = h('button', {
     class: 'btn btn-ghost icon-btn',
     title: 'Generation controls',
@@ -763,8 +880,10 @@ function ChatView() {
   return h('main', { class: 'main' },
     h('header', { class: 'topbar' },
       h('div', { class: 'topbar-title' },
+        modeSel,
         h('span', {}, 'Model'),
         ModelPicker(),
+        mcpBtn,
       ),
       h('div', { class: 'topbar-meta' },
         slidersBtn,
@@ -1303,7 +1422,7 @@ function SettingsView() {
         ),
         state.settingsLoading || !state.settings
           ? h('div', { class: 'card' }, h('div', { class: 'spinner' }))
-          : SettingsForm(state.settings),
+          : h('div', {}, SettingsForm(state.settings), MCPSettingsSection()),
       ),
     ),
   );
@@ -1311,6 +1430,65 @@ function SettingsView() {
     loadSettings().then(() => { if (state.view === 'settings') render(); });
   }
   return wrap;
+}
+
+function MCPSettingsSection() {
+  const section = h('section', { class: 'settings-cat' },
+    h('h2', { class: 'settings-cat-title' }, 'Agent / MCP servers'),
+  );
+  const body = h('div', { class: 'card settings-grid settings-grid-compact' });
+  section.appendChild(body);
+
+  const renderBody = async () => {
+    await ensureMCPServersLoaded();
+    body.innerHTML = '';
+    body.appendChild(h('div', { style: { display: 'flex', justifyContent: 'space-between', gap: '8px', alignItems: 'center' } },
+      h('p', { class: 'hint', style: { margin: 0 } }, 'Configure MCP servers used by Agent mode in Chat.'),
+      h('button', { class: 'btn btn-primary', onclick: () => openMCPEditor(null, async () => { await loadMCPServers(); await renderBody(); }) },
+        h('span', { html: ICON.plus }), 'Add server'),
+    ));
+    if (state.mcpServers.length === 0) {
+      body.appendChild(h('div', { class: 'empty-hint' }, 'No MCP servers configured.'));
+      return;
+    }
+    for (const srv of state.mcpServers) {
+      body.appendChild(h('div', { class: 'setting-row' },
+        h('div', { class: 'setting-label' },
+          h('div', { class: 'label' }, srv.name),
+          h('div', { class: 'hint' }, `${srv.transport} · ${srv.url || srv.command || '(unconfigured)'}`),
+          h('div', { class: 'chips', style: { marginTop: '6px' } },
+            h('span', { class: `chip ${srv.enabled ? 'success' : 'warn'}` }, srv.enabled ? 'enabled' : 'disabled'),
+          ),
+        ),
+        h('div', { class: 'setting-control', style: { display: 'flex', gap: '8px', flexWrap: 'wrap' } },
+          h('button', { class: 'btn btn-outline', onclick: async () => {
+            try {
+              const r = await api.get(`/api/agent/servers/${srv.id}/tools`);
+              showModal({
+                title: `Tools — ${srv.name}`,
+                body: h('div', {}, r.tools.length === 0
+                  ? h('p', { class: 'hint' }, 'No tools advertised.')
+                  : h('ul', { class: 'tool-list' }, ...r.tools.map(t => h('li', {}, h('code', {}, t.name), ' — ', t.description || 'no description')))),
+                actions: [{ label: 'Close', kind: 'btn-primary' }],
+              });
+            } catch (e) { toast('List tools failed: ' + e.message, 'error'); }
+          } }, 'Tools'),
+          h('button', { class: 'btn btn-outline', onclick: () => openMCPEditor(srv, async () => { await loadMCPServers(); await renderBody(); }) }, 'Edit'),
+          h('button', { class: 'btn btn-outline', onclick: async () => {
+            if (!confirm(`Delete server "${srv.name}"?`)) return;
+            await api.del(`/api/agent/servers/${srv.id}`);
+            state.agentSelectedServerIds = state.agentSelectedServerIds.filter(x => x !== srv.id);
+            await loadMCPServers();
+            await renderBody();
+          } }, h('span', { html: ICON.trash }), 'Delete'),
+        ),
+      ));
+    }
+  };
+
+  // Render async after initial frame.
+  setTimeout(() => { renderBody(); }, 0);
+  return section;
 }
 
 function SettingsForm(data) {
@@ -1464,6 +1642,11 @@ async function loadMCPServers() {
   } finally {
     state.mcpServersLoaded = true;
   }
+}
+
+async function ensureMCPServersLoaded(force = false) {
+  if (!force && state.mcpServersLoaded) return;
+  await loadMCPServers();
 }
 
 function AgentView() {
@@ -1803,7 +1986,7 @@ function render() {
   if (state.view === 'models') view = ModelsView();
   else if (state.view === 'train') view = TrainView();
   else if (state.view === 'settings') view = SettingsView();
-  else if (state.view === 'agent') view = AgentView();
+  else if (state.view === 'agent') { state.chatMode = 'agent'; view = ChatView(); }
   else view = ChatView();
   root.appendChild(view);
   if (prevScroll && prevView === state.view) {
