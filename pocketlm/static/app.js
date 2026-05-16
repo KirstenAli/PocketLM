@@ -1178,9 +1178,12 @@ function ModelCard(m, opts = {}) {
         if (evt.event === 'done') progressText.textContent = 'Finalizing…';
         if (evt.event === 'saved') progressText.textContent = `Saved (${(evt.size_bytes/1e9).toFixed(2)} GB)`;
         if (evt.event === 'error') {
-          if (evt.code === 'gated') showGatedModal({ repoId: evt.repo_id || model.repo_id });
-          else toast(evt.message, 'error');
-          break;
+          if (evt.code === 'gated') { showGatedModal({ repoId: evt.repo_id || model.repo_id });
+            throw new Error(evt.message || 'Gated model');
+          } else {
+            toast(evt.message, 'error');
+            throw new Error(evt.message);
+          }
         }
       }
       await refreshCatalog(); render();
@@ -1452,6 +1455,7 @@ function MCPSettingsSection() {
       return;
     }
     for (const srv of state.mcpServers) {
+      const builtin = isBuiltinServer(srv);
       body.appendChild(h('div', { class: 'setting-row' },
         h('div', { class: 'setting-label' },
           h('div', { class: 'label' }, srv.name),
@@ -1474,13 +1478,13 @@ function MCPSettingsSection() {
             } catch (e) { toast('List tools failed: ' + e.message, 'error'); }
           } }, 'Tools'),
           h('button', { class: 'btn btn-outline', onclick: () => openMCPEditor(srv, async () => { await loadMCPServers(); await renderBody(); }) }, 'Edit'),
-          h('button', { class: 'btn btn-outline', onclick: async () => {
+          !builtin ? h('button', { class: 'btn btn-outline', onclick: async () => {
             if (!confirm(`Delete server "${srv.name}"?`)) return;
             await api.del(`/api/agent/servers/${srv.id}`);
             state.agentSelectedServerIds = state.agentSelectedServerIds.filter(x => x !== srv.id);
             await loadMCPServers();
             await renderBody();
-          } }, h('span', { html: ICON.trash }), 'Delete'),
+          } }, h('span', { html: ICON.trash }), 'Delete') : null,
         ),
       ));
     }
@@ -1796,7 +1800,12 @@ function AgentBubble(m) {
   );
 }
 
+function isBuiltinServer(srv) {
+  return (srv?.transport || '').toLowerCase() === 'builtin';
+}
+
 function MCPServerCard(srv) {
+  const builtin = isBuiltinServer(srv);
   const checked = state.agentSelectedServerIds.includes(srv.id);
   const cb = h('input', { type: 'checkbox' });
   cb.checked = checked;
@@ -1834,13 +1843,13 @@ function MCPServerCard(srv) {
         h('button', { class: 'btn btn-outline',
           onclick: () => openMCPEditor(srv, async () => { await loadMCPServers(); render(); }),
         }, 'Edit'),
-        h('button', { class: 'btn btn-outline',
+        !builtin ? h('button', { class: 'btn btn-outline',
           onclick: async () => {
             if (!confirm(`Delete server "${srv.name}"?`)) return;
             await api.del(`/api/agent/servers/${srv.id}`);
             await loadMCPServers(); render();
           },
-        }, h('span', { html: ICON.trash })),
+        }, h('span', { html: ICON.trash })) : null,
       ),
     ),
   );
@@ -1848,6 +1857,7 @@ function MCPServerCard(srv) {
 
 function openMCPEditor(srv, onSaved) {
   const isNew = !srv;
+  const isBuiltin = !isNew && isBuiltinServer(srv);
   const form = {
     name: srv?.name || '',
     transport: srv?.transport || 'http',
@@ -1916,22 +1926,25 @@ function openMCPEditor(srv, onSaved) {
     h('div', { class: 'setting-row' },
       h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Name')),
       h('div', { class: 'setting-control' }, nameI)),
-    h('div', { class: 'setting-row' },
+    !isBuiltin ? h('div', { class: 'setting-row' },
       h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Transport')),
-      h('div', { class: 'setting-control' }, transportI)),
-    urlRow, cmdRow, argsRow,
-    h('div', { class: 'setting-row' },
+      h('div', { class: 'setting-control' }, transportI)) : null,
+    !isBuiltin ? urlRow : null,
+    !isBuiltin ? cmdRow : null,
+    !isBuiltin ? argsRow : null,
+    !isBuiltin ? h('div', { class: 'setting-row' },
       h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Headers'),
         h('div', { class: 'hint' }, 'Sent on http/sse requests. Values are encrypted at rest.')),
       h('div', { class: 'setting-control' }, headersContainer,
         h('button', { class: 'btn btn-outline', style: { marginTop: '8px' },
           onclick: () => { form.headers[''] = ''; renderHeaders(); } },
-          h('span', { html: ICON.plus }), 'Add header'))),
+          h('span', { html: ICON.plus }), 'Add header'))) : null,
+    isBuiltin ? h('div', { class: 'hint' }, 'Built-in server uses PocketLM-managed tooling. Only name and enabled can be changed.') : null,
     h('div', { class: 'setting-row' },
       h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Enabled')),
       h('div', { class: 'setting-control' }, enabledI)),
   );
-  toggleFields();
+  if (!isBuiltin) toggleFields();
 
   showModal({
     title: isNew ? 'Add MCP server' : `Edit — ${srv.name}`,
@@ -2005,6 +2018,4 @@ function render() {
   }
   render();
 })();
-
-
 

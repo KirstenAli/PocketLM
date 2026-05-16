@@ -1,16 +1,12 @@
-"""Minimal agent loop that lets a local LLM call MCP tools.
+"""JSON-action agent loop for MCP tools.
 
-Protocol: the system prompt enumerates each tool as JSON-schema and tells the
-model to emit either plain text (final answer) or a single tool call wrapped
-in `<tool_call>{...}</tool_call>`. We parse on close-tag, dispatch via the
-mcp_client, append a `tool` message with the result, and loop until either
-the model emits a plain-text turn or `max_tool_calls` is exhausted.
+The model chooses the next action by returning a JSON object. The runtime does
+no heuristic intent guessing; it only parses JSON and executes what the model
+requested.
 """
 from __future__ import annotations
 
-import asyncio
 import json
-import re
 from dataclasses import dataclass
 from typing import AsyncIterator
 
@@ -31,29 +27,81 @@ class ToolBinding:
     input_schema: dict
 
 
-_TOOL_CALL_RE = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
-
-
 def _build_system_prompt(user_system: str | None, tools: list[ToolBinding]) -> str:
     header = (user_system or "You are PocketLM Agent, a helpful local assistant.").strip()
-    if not tools:
-        return header
     catalog_lines = []
     for t in tools:
         schema = json.dumps(t.input_schema or {}, indent=2)
         catalog_lines.append(
             f"- name: {t.tool_name}\n  server: {t.server_name}\n  description: {t.description}\n  input_schema: {schema}"
         )
-    catalog = "\n".join(catalog_lines)
+    catalog = "\n".join(catalog_lines) if catalog_lines else "(no tools available)"
     return (
         f"{header}\n\n"
         "You have access to the following tools:\n"
         f"{catalog}\n\n"
-        "When you need to call a tool, respond with a SINGLE block:\n"
-        '<tool_call>{\"name\": \"tool_name\", \"arguments\": {...}}</tool_call>\n'
-        "Wait for the tool result (it will be appended as a `tool` message) before continuing.\n"
-        "When you have the final answer, respond with plain text only."
+        "Return ONLY one JSON object per turn using exactly one of these shapes:\n"
+        "1) Tool call:\n"
+        '{"action":"tool","name":"tool_name","arguments":{...}}\n'
+        "2) Final answer:\n"
+        '{"action":"final","text":"..."}\n\n'
+        "Rules:\n"
+        "- Do not return markdown, code fences, or prose outside JSON.\n"
+        "- Choose the next action yourself.\n"
+        "- If tool output is needed, emit a tool action first."
     )
+
+
+def _strip_fence(text: str) -> str:
+    t = (text or "").strip()
+    if t.startswith("```"):
+        lines = t.splitlines()
+        if len(lines) >= 2 and lines[-1].strip().startswith("```"):
+            t = "\n".join(lines[1:-1]).strip()
+    return t
+
+
+def _parse_action(text: str) -> dict | None:
+    """Parse a JSON action object from model output."""
+    t = _strip_fence(text)
+    if not t:
+        return None
+    if not (t.startswith("{") and t.endswith("}")):
+        a, b = t.find("{"), t.rfind("}")
+        if a == -1 or b == -1 or b <= a:
+            return None
+        t = t[a : b + 1]
+    try:
+        obj = json.loads(t)
+    except Exception:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def _coerce_action(obj: dict) -> tuple[str, str | None, dict | None, str | None]:
+    """Return (kind, tool_name, arguments, final_text)."""
+    action = str(obj.get("action") or "").strip().lower()
+
+    # Back-compat: allow {"name":...,"arguments":...} as implicit tool action.
+    if not action and isinstance(obj.get("name") or obj.get("tool"), str):
+        action = "tool"
+
+    if action == "tool":
+        name = obj.get("name") or obj.get("tool")
+        args = obj.get("arguments") or obj.get("args") or {}
+        if not isinstance(name, str) or not name.strip():
+            return "error", None, None, "tool action requires non-empty 'name'"
+        if not isinstance(args, dict):
+            return "error", None, None, "tool action requires object 'arguments'"
+        return "tool", name.strip(), args, None
+
+    if action == "final":
+        text = obj.get("text")
+        if text is None:
+            return "error", None, None, "final action requires 'text'"
+        return "final", None, None, str(text)
+
+    return "error", None, None, "action must be 'tool' or 'final'"
 
 
 async def _gather_tools(server_ids: list[int]) -> tuple[list[ToolBinding], list[dict]]:
@@ -114,10 +162,6 @@ async def run_agent(
 
     calls_made = 0
     while True:
-        # Stream one assistant turn, accumulating text. We don't forward
-        # tokens to the client while a tool call may be in flight (tokens
-        # inside <tool_call> would confuse the UI); instead we emit a
-        # single 'token' event with the visible portion after each turn.
         buf: list[str] = []
         try:
             async for chunk in stream_chat(
@@ -132,54 +176,46 @@ async def run_agent(
             yield {"event": "error", "message": str(e)}
             return
 
-        text = "".join(buf).strip()
-        match = _TOOL_CALL_RE.search(text)
+        raw = "".join(buf).strip()
+        obj = _parse_action(raw)
+        if obj is None:
+            yield {"event": "error", "message": "Agent must return a JSON action object."}
+            return
 
-        if match and calls_made < max_tool_calls:
-            calls_made += 1
-            # Anything before the tool_call is preamble — forward as a token.
-            preamble = text[: match.start()].strip()
-            if preamble:
-                yield {"event": "token", "text": preamble}
+        kind, tool_name, arguments, final_text = _coerce_action(obj)
+        if kind == "error":
+            yield {"event": "error", "message": final_text or "Invalid action"}
+            return
+
+        if kind == "final":
+            if final_text:
+                yield {"event": "token", "text": final_text}
+            yield {"event": "done"}
+            return
+
+        # tool action
+        if calls_made >= max_tool_calls:
+            yield {"event": "error", "message": "tool-call budget exhausted"}
+            return
+        calls_made += 1
+        yield {"event": "tool_call", "name": tool_name, "arguments": arguments}
+
+        binding = by_name.get(tool_name)
+        if binding is None:
+            tool_result = [{"type": "text", "text": f"Error: unknown tool '{tool_name}'."}]
+        else:
+            with session_scope() as s:
+                srv = s.get(MCPServer, binding.server_id)
             try:
-                payload = json.loads(match.group(1))
-                tool_name = payload.get("name") or payload.get("tool")
-                arguments = payload.get("arguments") or payload.get("args") or {}
+                tool_result = await mcp_client.call_tool(srv, tool_name, arguments or {})
             except Exception as e:  # noqa: BLE001
-                yield {"event": "error", "message": f"Failed to parse tool call: {e}"}
-                return
+                tool_result = [{"type": "text", "text": f"Tool error: {e}"}]
 
-            yield {"event": "tool_call", "name": tool_name, "arguments": arguments}
+        yield {"event": "tool_result", "name": tool_name, "result": tool_result}
 
-            binding = by_name.get(tool_name)
-            if binding is None:
-                tool_result = [{"type": "text", "text": f"Error: unknown tool '{tool_name}'."}]
-            else:
-                with session_scope() as s:
-                    srv = s.get(MCPServer, binding.server_id)
-                try:
-                    tool_result = await mcp_client.call_tool(srv, tool_name, arguments)
-                except Exception as e:  # noqa: BLE001
-                    tool_result = [{"type": "text", "text": f"Tool error: {e}"}]
-
-            yield {"event": "tool_result", "name": tool_name, "result": tool_result}
-
-            # Feed the tool call + result back into the conversation so the
-            # model can continue. We use plain `assistant`/`user` roles for
-            # maximum compatibility with small chat templates.
-            messages.append({"role": "assistant", "content": match.group(0)})
-            messages.append({
-                "role": "user",
-                "content": f"<tool_result name=\"{tool_name}\">{json.dumps(tool_result)}</tool_result>",
-            })
-            continue
-
-        # No more tool calls (or budget exhausted) — emit final answer.
-        final = text
-        if calls_made >= max_tool_calls and match:
-            final = "(tool-call budget exhausted) " + text[: match.start()].strip()
-        if final:
-            yield {"event": "token", "text": final}
-        yield {"event": "done"}
-        return
-
+        # Feed action + result back so model can choose next step.
+        messages.append({"role": "assistant", "content": json.dumps(obj)})
+        messages.append({
+            "role": "user",
+            "content": f"<tool_result name=\"{tool_name}\">{json.dumps(tool_result)}</tool_result>",
+        })

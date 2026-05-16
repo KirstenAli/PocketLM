@@ -10,6 +10,7 @@ from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
 from ..models_schema import MCPServer
+from . import builtin_tools
 from .settings_store import decrypt_secret, encrypt_secret
 
 
@@ -109,6 +110,8 @@ async def _connect(server: MCPServer):
 
 
 async def list_tools(server: MCPServer) -> list[dict]:
+    if (server.transport or "").lower() == "builtin":
+        return builtin_tools.list_tools()
     async with _connect(server) as session:
         resp = await session.list_tools()
         tools = []
@@ -122,6 +125,8 @@ async def list_tools(server: MCPServer) -> list[dict]:
 
 
 async def call_tool(server: MCPServer, name: str, arguments: dict[str, Any]) -> Any:
+    if (server.transport or "").lower() == "builtin":
+        return builtin_tools.call_tool(name, arguments or {})
     async with _connect(server) as session:
         result = await session.call_tool(name, arguments or {})
         # Normalise content blocks to a plain serialisable structure.

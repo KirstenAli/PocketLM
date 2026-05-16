@@ -13,6 +13,7 @@ A local-first, Ollama-style desktop app for chatting with — and fine-tuning �
 - 🎯 **Fine-tune in the UI** — point at a `.txt` / `.jsonl` / `.csv` file, hit **Train**. LoRA + TRL `SFTTrainer` under the hood. Live loss chart.
 - 🧠 **Use your adapter** in chat as soon as training finishes
 - 🤖 **Agent mode** — connect to MCP (Model Context Protocol) servers and let the local model call tools
+- 🧰 **Built-in MCP tools** — ships with a default local tool server (safe terminal `run_command`) so Agent mode works out of the box
 - ⚙️ **In‑app Settings** — every `.env` value (HF token, device, host/port) editable from the UI; secrets encrypted at rest with Fernet
 - 🗄️ Local SQLite for chat & job history
 - 🔌 Pure Python — no Node build step
@@ -48,6 +49,16 @@ Every setting can be edited in‑app at **Settings** (gear icon in the sidebar) 
 | `POCKETLM_NO_BROWSER` | Don't pop a browser on launch. |
 | `POCKETLM_HOME` | Override the storage root (default `~/.pocketlm`). |
 | `POCKETLM_SECRET_KEY` | Fernet key for secret encryption. Auto‑generated to `~/.pocketlm/.secret_key` if absent. |
+
+## Built-in MCP tools
+
+PocketLM auto-creates a default MCP server named `PocketLM Built-in Tools`.
+
+- Tool: `run_command`
+- Allowed commands: `pwd`, `ls`, `cat`, `echo`, `head`, `tail`, `wc`, `grep`, `find`
+- Guardrails: workspace-only `cwd`, timeout, and output truncation
+
+You can manage/disable it from **Settings → Agent / MCP servers**.
 
 ## Tests
 

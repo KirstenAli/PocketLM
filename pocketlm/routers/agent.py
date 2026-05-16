@@ -53,25 +53,28 @@ def update_server(sid: int, payload: MCPServerIn):
         if not row:
             raise HTTPException(404, "Not found")
         row.name = payload.name.strip() or row.name
-        row.transport = (payload.transport or row.transport).lower()
-        row.url = payload.url or ""
-        row.command = payload.command or ""
-        row.args_json = json.dumps(payload.args or [])
+        builtin = (row.transport or "").lower() == "builtin"
+        if not builtin:
+            row.transport = (payload.transport or row.transport).lower()
+            row.url = payload.url or ""
+            row.command = payload.command or ""
+            row.args_json = json.dumps(payload.args or [])
         # Preserve existing header values when the client sends masked placeholders.
-        existing = json.loads(row.headers_json or "{}")
-        merged_plain = {}
-        for k, v in (payload.headers or {}).items():
-            if v == "••••••" and k in existing:
-                merged_plain_enc = existing[k]
-                # keep existing encrypted blob
-                existing[k] = merged_plain_enc
-            else:
-                merged_plain[k] = v
-        new_enc = mcp_client.encrypt_headers(merged_plain)
-        existing.update(new_enc)
-        # Drop any header keys the client removed.
-        existing = {k: v for k, v in existing.items() if k in (payload.headers or {})}
-        row.headers_json = json.dumps(existing)
+        if not builtin:
+            existing = json.loads(row.headers_json or "{}")
+            merged_plain = {}
+            for k, v in (payload.headers or {}).items():
+                if v == "••••••" and k in existing:
+                    merged_plain_enc = existing[k]
+                    # keep existing encrypted blob
+                    existing[k] = merged_plain_enc
+                else:
+                    merged_plain[k] = v
+            new_enc = mcp_client.encrypt_headers(merged_plain)
+            existing.update(new_enc)
+            # Drop any header keys the client removed.
+            existing = {k: v for k, v in existing.items() if k in (payload.headers or {})}
+            row.headers_json = json.dumps(existing)
         row.enabled = bool(payload.enabled)
         s.add(row)
         s.commit()
@@ -84,6 +87,8 @@ def delete_server(sid: int):
     with session_scope() as s:
         row = s.get(MCPServer, sid)
         if row:
+            if (row.transport or "").lower() == "builtin":
+                raise HTTPException(400, "Built-in server cannot be deleted")
             s.delete(row)
             s.commit()
     return {"ok": True}

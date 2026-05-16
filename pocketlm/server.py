@@ -17,6 +17,7 @@ from .routers import downloads as downloads_router
 from .routers import settings as settings_router
 from .routers import training as training_router
 from .routers import agent as agent_router
+from .services.builtin_tools import ensure_builtin_server
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -33,6 +34,7 @@ app.add_middleware(
 @app.on_event("startup")
 def _startup() -> None:
     init_db()
+    ensure_builtin_server()
 
 
 @app.get("/api/health")
