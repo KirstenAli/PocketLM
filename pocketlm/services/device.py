@@ -1,17 +1,15 @@
 """Device & dtype detection."""
 from __future__ import annotations
 
-from functools import lru_cache
-
-from ..config import DEVICE_OVERRIDE
+from ..config import get_device_override
 
 
-@lru_cache(maxsize=1)
 def pick_device() -> str:
     import torch
 
-    if DEVICE_OVERRIDE in {"mps", "cuda", "cpu"}:
-        return DEVICE_OVERRIDE
+    override = get_device_override()
+    if override in {"mps", "cuda", "cpu"}:
+        return override
     if torch.cuda.is_available():
         return "cuda"
     if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
@@ -40,4 +38,3 @@ def device_info() -> dict:
         "cuda": torch.cuda.is_available(),
         "mps": bool(getattr(torch.backends, "mps", None) and torch.backends.mps.is_available()),
     }
-

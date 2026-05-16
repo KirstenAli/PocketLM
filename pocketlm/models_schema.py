@@ -49,3 +49,25 @@ class TrainingJob(SQLModel, table=True):
     finished_at: Optional[datetime] = None
     log_path: str = ""
 
+
+class AppSetting(SQLModel, table=True):
+    """Persisted configuration value. Secrets are stored encrypted in `value`
+    (Fernet ciphertext, base64). Non-secret values are stored as plain JSON."""
+    key: str = Field(primary_key=True)
+    value: str = ""           # encrypted for secrets, raw JSON for others
+    is_secret: bool = False
+    updated_at: datetime = Field(default_factory=_utcnow)
+
+
+class MCPServer(SQLModel, table=True):
+    """User-configured MCP (Model Context Protocol) server."""
+    id: Optional[int] = Field(default=None, primary_key=True)
+    name: str
+    transport: str = "http"  # "stdio" | "sse" | "http"
+    url: str = ""            # for sse/http
+    command: str = ""        # for stdio
+    args_json: str = "[]"    # JSON list of stdio args
+    headers_json: str = "{}" # JSON dict of auth headers (values may be Fernet-encrypted with prefix "enc:")
+    enabled: bool = True
+    created_at: datetime = Field(default_factory=_utcnow)
+

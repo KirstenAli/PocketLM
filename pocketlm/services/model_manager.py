@@ -76,20 +76,31 @@ def load(model_id: str) -> LoadedModel:
 
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
+        from .errors import GatedModelError, classify_hf_exception
+
         device = pick_device()
         dtype = pick_dtype(recommended)
         base_path = _resolve_base_path(base_repo)
 
-        tokenizer = AutoTokenizer.from_pretrained(base_path, trust_remote_code=True)
+        def _wrap(call):
+            try:
+                return call()
+            except Exception as e:  # noqa: BLE001
+                typed = classify_hf_exception(base_repo, e)
+                if isinstance(typed, GatedModelError):
+                    raise typed from e
+                raise
+
+        tokenizer = _wrap(lambda: AutoTokenizer.from_pretrained(base_path, trust_remote_code=True))
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        model = AutoModelForCausalLM.from_pretrained(
+        model = _wrap(lambda: AutoModelForCausalLM.from_pretrained(
             base_path,
             torch_dtype=dtype,
             trust_remote_code=True,
             low_cpu_mem_usage=True,
-        )
+        ))
         model.to(device)
         model.eval()
 

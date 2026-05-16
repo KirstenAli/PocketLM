@@ -5,7 +5,7 @@ import json
 import shutil
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from sqlmodel import select
 
 from ..catalog import CATALOG
@@ -75,26 +75,83 @@ def _custom_card(rec: ModelRecord) -> dict:
 
 
 @router.get("/catalog")
-def get_catalog() -> dict:
-    items = []
+def get_catalog(
+    limit: int = Query(24, ge=1, le=100),
+    offset: int = Query(0, ge=0),
+) -> dict:
+    """Paginated catalog. Ordering rules (applied server-side so the cursor
+    is stable as the user scrolls):
+      1. Freshly-installed entries (curated or custom) first, newest first.
+      2. User-added custom installs next, newest first.
+      3. Curated catalog entries in declared order.
+    """
+    NEW_WINDOW_S = 10 * 60
+    from datetime import datetime as _dt
+    now = _dt.utcnow()
+
+    items: list[dict] = []
     catalog_ids = {m.repo_id for m in CATALOG}
     with session_scope() as s:
         installed_recs = {r.repo_id: r for r in s.exec(select(ModelRecord)).all()}
-    for m in CATALOG:
+    for idx, m in enumerate(CATALOG):
         d = m.to_dict()
         rec = installed_recs.get(m.repo_id)
-        # Only trust the DB. Stale/empty folders from failed downloads
-        # should NOT be counted as installed.
         d["installed"] = rec is not None
         d["custom"] = False
         d["downloaded_at"] = rec.downloaded_at.isoformat() if (rec and rec.downloaded_at) else None
+        d["_order"] = idx
         items.append(d)
-    # Surface user-added (non-curated) installed models as custom cards.
     for rid, rec in installed_recs.items():
         if rid in catalog_ids:
             continue
-        items.append(_custom_card(rec))
-    return {"models": items, "device": device_info()}
+        c = _custom_card(rec)
+        c["_order"] = 10_000_000
+        items.append(c)
+
+    def _fresh(d: dict) -> bool:
+        ts = d.get("downloaded_at")
+        if not ts or not d.get("installed"):
+            return False
+        try:
+            t = _dt.fromisoformat(ts)
+        except ValueError:
+            return False
+        return (now - t).total_seconds() < NEW_WINDOW_S
+
+    def _sort_key(d: dict):
+        fresh = _fresh(d)
+        ts = d.get("downloaded_at") or ""
+        return (
+            0 if fresh else 1,
+            # newest-first within fresh tier (reverse ISO sort works)
+            -_ts_or_zero(ts) if fresh else 0,
+            0 if d.get("custom") else 1,
+            -_ts_or_zero(ts) if d.get("custom") else 0,
+            d.get("_order", 0),
+        )
+    items.sort(key=_sort_key)
+    for it in items:
+        it.pop("_order", None)
+
+    total = len(items)
+    page = items[offset : offset + limit]
+    next_offset = offset + len(page) if (offset + len(page)) < total else None
+    return {
+        "models": page,
+        "device": device_info() if offset == 0 else None,
+        "total": total,
+        "next_offset": next_offset,
+    }
+
+
+def _ts_or_zero(iso: str) -> float:
+    if not iso:
+        return 0.0
+    from datetime import datetime as _dt
+    try:
+        return _dt.fromisoformat(iso).timestamp()
+    except ValueError:
+        return 0.0
 
 
 @router.get("/models")

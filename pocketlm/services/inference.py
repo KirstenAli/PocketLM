@@ -92,7 +92,14 @@ async def stream_chat(
     *,
     temperature: float = 0.7,
     top_p: float = 0.95,
+    top_k: Optional[int] = None,
+    repetition_penalty: Optional[float] = None,
     max_new_tokens: int = 512,
+    min_new_tokens: Optional[int] = None,
+    do_sample: Optional[bool] = None,
+    num_beams: Optional[int] = None,
+    seed: Optional[int] = None,
+    stop_sequences: Optional[list[str]] = None,
     stop_event: Optional[threading.Event] = None,
 ) -> AsyncIterator[str]:
     """Yield generated text chunks. If stop_event is set, generation halts."""
@@ -121,17 +128,57 @@ async def stream_chat(
         def __call__(self, input_ids, scores, **kwargs) -> bool:
             return stop_event.is_set()
 
+    stopping = [_StopOnFlag()]
+
+    # Optional stop-sequences: decode the tail after each new token and trip
+    # the stopping criteria when any sequence appears verbatim. Cheap because
+    # we only decode the last ~32 generated tokens.
+    if stop_sequences:
+        prompt_len = inputs["input_ids"].shape[-1]
+        norm_stops = [s for s in stop_sequences if s]
+
+        class _StopOnText(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs) -> bool:
+                try:
+                    tail = input_ids[0, prompt_len:][-32:]
+                    text = tokenizer.decode(tail, skip_special_tokens=True)
+                except Exception:
+                    return False
+                return any(s in text for s in norm_stops)
+
+        stopping.append(_StopOnText())
+
+    if seed is not None:
+        try:
+            torch.manual_seed(int(seed))
+        except Exception:
+            pass
+
+    # Resolve sampling defaults. Explicit `do_sample=False` always wins;
+    # otherwise sample when temperature > 0 (matches legacy behaviour).
+    effective_sample = (
+        bool(do_sample) if do_sample is not None else (temperature is not None and temperature > 0)
+    )
+
     gen_kwargs = dict(
         **inputs,
         streamer=streamer,
         max_new_tokens=max_new_tokens,
-        do_sample=temperature > 0,
-        temperature=max(temperature, 1e-5),
+        do_sample=effective_sample,
+        temperature=max(temperature or 0.0, 1e-5),
         top_p=top_p,
         pad_token_id=tokenizer.pad_token_id,
         eos_token_id=tokenizer.eos_token_id,
-        stopping_criteria=StoppingCriteriaList([_StopOnFlag()]),
+        stopping_criteria=StoppingCriteriaList(stopping),
     )
+    if top_k is not None and top_k > 0:
+        gen_kwargs["top_k"] = int(top_k)
+    if repetition_penalty is not None and repetition_penalty > 0:
+        gen_kwargs["repetition_penalty"] = float(repetition_penalty)
+    if min_new_tokens is not None and min_new_tokens > 0:
+        gen_kwargs["min_new_tokens"] = int(min_new_tokens)
+    if num_beams is not None and num_beams > 1:
+        gen_kwargs["num_beams"] = int(num_beams)
 
     error: dict = {}
 
@@ -165,4 +212,6 @@ async def stream_chat(
 
     if "err" in error:
         raise RuntimeError(error["err"])
+
+
 

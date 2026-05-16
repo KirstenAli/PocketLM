@@ -14,7 +14,9 @@ from .routers import catalog as catalog_router
 from .routers import chat as chat_router
 from .routers import conversations as conv_router
 from .routers import downloads as downloads_router
+from .routers import settings as settings_router
 from .routers import training as training_router
+from .routers import agent as agent_router
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -43,6 +45,8 @@ app.include_router(downloads_router.router, prefix="/api", tags=["downloads"])
 app.include_router(conv_router.router, prefix="/api", tags=["conversations"])
 app.include_router(chat_router.router, prefix="/api", tags=["chat"])
 app.include_router(training_router.router, prefix="/api", tags=["training"])
+app.include_router(settings_router.router, prefix="/api", tags=["settings"])
+app.include_router(agent_router.router, prefix="/api", tags=["agent"])
 
 
 # Serve SPA

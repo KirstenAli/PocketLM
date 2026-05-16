@@ -9,7 +9,8 @@ from typing import AsyncIterator
 
 from huggingface_hub import snapshot_download
 
-from ..config import HF_TOKEN, MODELS_DIR
+from ..config import HF_TOKEN, MODELS_DIR, get_hf_token
+from .errors import GatedModelError, RepoNotFoundError, classify_hf_exception
 
 
 def _safe_dirname(repo_id: str) -> str:
@@ -52,17 +53,13 @@ def normalize_repo_id(raw: str) -> str:
 
 
 def _friendly_error(repo_id: str, exc: Exception) -> str:
+    typed = classify_hf_exception(repo_id, exc)
+    if isinstance(typed, GatedModelError):
+        return typed.message
+    if isinstance(typed, RepoNotFoundError):
+        return f"Repo not found: {repo_id}"
     msg = str(exc)
     low = msg.lower()
-    if "gated" in low or "restricted" in low or "401" in msg or "403" in msg:
-        return (
-            f"🔒 {repo_id} is a gated model. "
-            f"1) Accept the license on https://huggingface.co/{repo_id}  "
-            f"2) Put your token in the .env file as HF_TOKEN=hf_...  "
-            f"3) Restart PocketLM."
-        )
-    if "not found" in low or "404" in msg:
-        return f"Repo not found: {repo_id}"
     if "connection" in low or "timeout" in low or "name resolution" in low:
         return "Network error talking to Hugging Face. Check your internet connection."
     return msg
@@ -75,7 +72,7 @@ async def stream_download(repo_id: str) -> AsyncIterator[dict]:
         {"event": "start"}
         {"event": "progress", "message": "..."}
         {"event": "done", "path": "..."}
-        {"event": "error", "message": "..."}
+        {"event": "error", "message": "...", "code"?: "gated" | "not_found"}
     """
     import shutil
 
@@ -93,7 +90,7 @@ async def stream_download(repo_id: str) -> AsyncIterator[dict]:
             path = snapshot_download(
                 repo_id=repo_id,
                 local_dir=str(target),
-                token=HF_TOKEN,
+                token=get_hf_token(),
                 # Skip giant optional weights when possible.
                 allow_patterns=[
                     "*.json",
@@ -117,10 +114,13 @@ async def stream_download(repo_id: str) -> AsyncIterator[dict]:
                     shutil.rmtree(target, ignore_errors=True)
             except Exception:
                 pass
-            loop.call_soon_threadsafe(
-                queue.put_nowait,
-                {"event": "error", "message": _friendly_error(repo_id, e)},
-            )
+            typed = classify_hf_exception(repo_id, e)
+            evt = {"event": "error", "message": _friendly_error(repo_id, e), "repo_id": repo_id}
+            if isinstance(typed, GatedModelError):
+                evt["code"] = "gated"
+            elif isinstance(typed, RepoNotFoundError):
+                evt["code"] = "not_found"
+            loop.call_soon_threadsafe(queue.put_nowait, evt)
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
@@ -151,4 +151,3 @@ def folder_size(path: Path) -> int:
             except OSError:
                 pass
     return total
-

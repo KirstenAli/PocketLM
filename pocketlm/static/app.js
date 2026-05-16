@@ -33,6 +33,10 @@ const ICON = {
   upload:  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
   sun:     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>`,
   moon:    `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>`,
+  settings:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8v.1a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>`,
+  sliders: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="4" y1="21" x2="4" y2="14"/><line x1="4" y1="10" x2="4" y2="3"/><line x1="12" y1="21" x2="12" y2="12"/><line x1="12" y1="8" x2="12" y2="3"/><line x1="20" y1="21" x2="20" y2="16"/><line x1="20" y1="12" x2="20" y2="3"/><line x1="1" y1="14" x2="7" y2="14"/><line x1="9" y1="8" x2="15" y2="8"/><line x1="17" y1="16" x2="23" y2="16"/></svg>`,
+  agent:   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="10" rx="2"/><circle cx="12" cy="5" r="2"/><path d="M12 7v4"/><line x1="8" y1="16" x2="8" y2="16"/><line x1="16" y1="16" x2="16" y2="16"/></svg>`,
+  eye:     `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>`,
 };
 
 // Brand mark — white-on-gradient version of /static/logo.svg, designed to drop
@@ -211,6 +215,10 @@ function setMd(el, text, highlight = true) {
 const state = {
   view: 'chat',
   catalog: [],
+  catalogTotal: 0,
+  catalogOffset: 0,
+  catalogExhausted: false,
+  catalogLoading: false,
   installed: [],
   device: null,
   conversations: [],
@@ -223,9 +231,22 @@ const state = {
   selectedModel: localStorage.getItem('pocketlm.model') || '',
   generating: false,
   abortCtl: null, // AbortController for the active /api/chat stream
+  // Settings page
+  settings: null,
+  settingsLoading: false,
+  // Agent
+  mcpServers: [],
+  mcpServersLoaded: false,
+  agentMessages: [],
+  agentSelectedServerIds: [],
+  agentGenerating: false,
+  agentAbortCtl: null,
+  // Settings deep-link target (e.g. focus HF_TOKEN after gated error)
+  settingsFocusKey: null,
 };
 
 const PAGE_SIZE = 50;
+const CATALOG_PAGE = 24;
 
 function resetChatState() {
   if (state.abortCtl) { try { state.abortCtl.abort(); } catch {} }
@@ -238,14 +259,36 @@ function resetChatState() {
 }
 
 async function refreshCatalog() {
-  const data = await api.get('/api/catalog');
-  state.catalog = data.models;
-  state.device = data.device;
+  // Reset to first page (used after install/delete or initial load).
+  const data = await api.get(`/api/catalog?limit=${CATALOG_PAGE}&offset=0`);
+  state.catalog = data.models || [];
+  state.catalogTotal = data.total || state.catalog.length;
+  state.catalogOffset = state.catalog.length;
+  state.catalogExhausted = data.next_offset == null;
+  state.catalogLoading = false;
+  if (data.device) state.device = data.device;
   const inst = await api.get('/api/models');
   state.installed = inst.models;
   if ((!state.selectedModel || !state.installed.some(m => m.repo_id === state.selectedModel)) && state.installed[0]) {
     state.selectedModel = state.installed[0].repo_id;
     localStorage.setItem('pocketlm.model', state.selectedModel);
+  }
+}
+
+async function loadMoreCatalog() {
+  if (state.catalogLoading || state.catalogExhausted) return 0;
+  state.catalogLoading = true;
+  try {
+    const data = await api.get(`/api/catalog?limit=${CATALOG_PAGE}&offset=${state.catalogOffset}`);
+    const page = data.models || [];
+    const seen = new Set(state.catalog.map(m => m.repo_id));
+    let added = 0;
+    for (const m of page) if (!seen.has(m.repo_id)) { state.catalog.push(m); added++; }
+    state.catalogOffset += page.length;
+    if (data.next_offset == null) state.catalogExhausted = true;
+    return added;
+  } finally {
+    state.catalogLoading = false;
   }
 }
 async function refreshConversations() {
@@ -337,9 +380,11 @@ function Sidebar() {
       ),
     ),
     h('div', { class: 'nav' },
-      navItem('chat',   'Chat',      'chat'),
-      navItem('models', 'Models',    'models'),
-      navItem('train',  'Fine-tune', 'train'),
+      navItem('chat',     'Chat',      'chat'),
+      navItem('models',   'Models',    'models'),
+      navItem('train',    'Fine-tune', 'train'),
+      navItem('agent',    'Agent',     'agent'),
+      navItem('settings', 'Settings',  'settings'),
     ),
     h('button', { class: 'new-chat-btn', onclick: newChat },
       h('span', { html: ICON.plus }), 'New chat'),
@@ -349,13 +394,152 @@ function Sidebar() {
   );
 }
 
-// =================================================================
-// CHAT
-// =================================================================
-function ModelPicker() {
+// --------------- Modal helpers ---------------
+function showModal({ title, body, actions }) {
+  const close = () => { wrap.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  const card = h('div', { class: 'modal-card', role: 'dialog', 'aria-modal': 'true' },
+    h('div', { class: 'modal-title' }, title),
+    h('div', { class: 'modal-body' }, body),
+    h('div', { class: 'modal-actions' }, ...actions.map(a =>
+      h('button', { class: `btn ${a.kind || 'btn-outline'}`, onclick: () => { try { a.onclick && a.onclick(); } finally { close(); } } }, a.label)
+    )),
+  );
+  const wrap = h('div', { class: 'modal-backdrop', onclick: (e) => { if (e.target === wrap) close(); } }, card);
+  document.body.appendChild(wrap);
+  document.addEventListener('keydown', onKey);
+  return close;
+}
+
+function showGatedModal({ repoId }) {
+  return showModal({
+    title: '🔒 Gated model',
+    body: h('div', {},
+      h('p', {}, repoId
+        ? `${repoId} requires a Hugging Face access token and an accepted license.`
+        : 'This model requires a Hugging Face access token and an accepted license.'),
+      h('p', { class: 'hint' },
+        '1) Accept the license on the model page. 2) Paste your HF token in Settings → Hugging Face.'),
+    ),
+    actions: [
+      repoId ? { label: 'Open license page', kind: 'btn-outline',
+        onclick: () => window.open(`https://huggingface.co/${repoId}`, '_blank', 'noopener') } : null,
+      { label: 'Open Settings', kind: 'btn-primary',
+        onclick: () => { state.settingsFocusKey = 'HF_TOKEN'; navigate('settings'); } },
+    ].filter(Boolean),
+  });
+}
+
+// --------------- Chat controls (per-conversation) ---------------
+const CHAT_CFG_DEFAULT = {
+  temperature: 0.7, top_p: 0.95, top_k: 0, repetition_penalty: 1.0,
+  max_new_tokens: 512, min_new_tokens: 0,
+  do_sample: true, num_beams: 1, seed: '',
+  system_prompt: '', stop_sequences: [],
+};
+function chatCfgKey(convId) { return 'pocketlm.chatcfg.' + (convId || '_default'); }
+function getChatCfg(convId) {
+  try {
+    const raw = localStorage.getItem(chatCfgKey(convId)) || localStorage.getItem(chatCfgKey(null));
+    return raw ? { ...CHAT_CFG_DEFAULT, ...JSON.parse(raw) } : { ...CHAT_CFG_DEFAULT };
+  } catch { return { ...CHAT_CFG_DEFAULT }; }
+}
+function saveChatCfg(convId, cfg) {
+  try { localStorage.setItem(chatCfgKey(convId), JSON.stringify(cfg)); } catch {}
+}
+function chatCfgPayload(cfg) {
+  const num = (v) => {
+    if (v === '' || v === null || v === undefined) return null;
+    const n = Number(v); return Number.isFinite(n) ? n : null;
+  };
+  return {
+    temperature: num(cfg.temperature) ?? 0.7,
+    top_p: num(cfg.top_p) ?? 0.95,
+    top_k: num(cfg.top_k) > 0 ? num(cfg.top_k) : null,
+    repetition_penalty: num(cfg.repetition_penalty) > 0 ? num(cfg.repetition_penalty) : null,
+    max_new_tokens: num(cfg.max_new_tokens) || 512,
+    min_new_tokens: num(cfg.min_new_tokens) > 0 ? num(cfg.min_new_tokens) : null,
+    do_sample: !!cfg.do_sample,
+    num_beams: num(cfg.num_beams) > 1 ? num(cfg.num_beams) : null,
+    seed: num(cfg.seed),
+    stop_sequences: Array.isArray(cfg.stop_sequences) ? cfg.stop_sequences.filter(Boolean) : null,
+    system_prompt: cfg.system_prompt || null,
+  };
+}
+
+function ChatControlsDrawer(convId) {
+  const cfg = getChatCfg(convId);
+  const drawer = h('aside', { class: 'drawer', 'aria-label': 'Generation controls' });
+
+  const persist = () => saveChatCfg(convId, cfg);
+  const row = (label, hint, control) => h('div', { class: 'drawer-row' },
+    h('label', { class: 'label' }, label),
+    control,
+    hint ? h('div', { class: 'hint' }, hint) : null,
+  );
+  const num = (key, step, min) => {
+    const i = h('input', { class: 'input', type: 'number', step: step || 'any', value: cfg[key] ?? '' });
+    if (min !== undefined) i.min = String(min);
+    i.oninput = () => { cfg[key] = i.value === '' ? '' : Number(i.value); persist(); };
+    return i;
+  };
+  const text = (key, placeholder) => {
+    const i = h('input', { class: 'input', type: 'text', value: cfg[key] || '', placeholder: placeholder || '' });
+    i.oninput = () => { cfg[key] = i.value; persist(); };
+    return i;
+  };
+  const toggle = (key) => {
+    const sw = h('label', { class: 'switch' },
+      h('input', { type: 'checkbox' }),
+      h('span', { class: 'switch-track' }),
+    );
+    const input = sw.querySelector('input');
+    input.checked = !!cfg[key];
+    input.onchange = () => { cfg[key] = input.checked; persist(); };
+    return sw;
+  };
+  const sysPrompt = h('textarea', { class: 'input', rows: 3, placeholder: 'Optional system prompt…' }, cfg.system_prompt || '');
+  sysPrompt.oninput = () => { cfg.system_prompt = sysPrompt.value; persist(); };
+
+  // Stop sequences as a comma-separated input.
+  const stops = h('input', { class: 'input', type: 'text', value: (cfg.stop_sequences || []).join(', '),
+    placeholder: 'e.g. </end>, \\n\\nUser:' });
+  stops.oninput = () => {
+    cfg.stop_sequences = stops.value.split(',').map(s => s.trim()).filter(Boolean);
+    persist();
+  };
+
+  drawer.append(
+    h('div', { class: 'drawer-header' },
+      h('span', { html: ICON.sliders }),
+      h('h3', {}, 'Generation controls'),
+    ),
+    h('div', { class: 'drawer-body' },
+      row('System prompt', 'Prepended to the conversation.', sysPrompt),
+      row('Temperature', 'Higher = more creative. 0 = greedy.', num('temperature', '0.05', 0)),
+      row('top_p (nucleus)', null, num('top_p', '0.05', 0)),
+      row('top_k', '0 = disabled.', num('top_k', '1', 0)),
+      row('Repetition penalty', '1.0 = none, ~1.15 reduces loops.', num('repetition_penalty', '0.05', 0)),
+      row('Max new tokens', null, num('max_new_tokens', '8', 1)),
+      row('Min new tokens', '0 = no minimum.', num('min_new_tokens', '1', 0)),
+      row('Beam search width', '1 = no beams.', num('num_beams', '1', 1)),
+      row('Sampling', 'Off = greedy / beam search.',
+        h('div', { style: { display: 'flex', alignItems: 'center', gap: '10px' } }, toggle('do_sample'), h('span', { class: 'hint', style: { margin: 0 } }, 'do_sample'))),
+      row('Seed', 'Set for reproducible output.', num('seed', '1')),
+      row('Stop sequences', 'Comma-separated.', stops),
+    ),
+  );
+  return drawer;
+}
+
+function ModelPicker(extraOnChange) {
   const sel = h('select', {
-    class: 'input', style: { width: 'auto', minWidth: '280px' },
-    onchange: (e) => { state.selectedModel = e.target.value; localStorage.setItem('pocketlm.model', state.selectedModel); },
+    class: 'input', style: { width: 'auto', minWidth: '240px' },
+    onchange: (e) => {
+      state.selectedModel = e.target.value;
+      localStorage.setItem('pocketlm.model', state.selectedModel);
+      if (typeof extraOnChange === 'function') extraOnChange(e.target.value);
+    },
   });
   if (state.installed.length === 0) {
     sel.appendChild(h('option', { value: '' }, '— No models installed —'));
@@ -525,10 +709,12 @@ function ChatView() {
     renderMessages();
 
     try {
+      const cfg = chatCfgPayload(getChatCfg(convAtSend.id));
       for await (const evt of api.stream('/api/chat', {
         conversation_id: convAtSend.id,
         model_id: state.selectedModel,
         message: text,
+        ...cfg,
       }, { signal: state.abortCtl.signal })) {
         // If the user navigated away / started a new chat / deleted this conv, drop tokens.
         if (state.currentConv?.id !== convAtSend.id) break;
@@ -539,8 +725,13 @@ function ChatView() {
           if (last) { setMd(last, assistant.content, false); last.classList.add('streaming'); }
           messagesEl.scrollTop = messagesEl.scrollHeight;
         } else if (evt.event === 'error') {
-          toast(evt.message, 'error');
-          assistant.content += `\n\n*Error: ${evt.message}*`;
+          if (evt.code === 'gated') {
+            showGatedModal({ repoId: evt.repo_id || state.selectedModel });
+            assistant.content += `\n\n*${evt.message || 'Gated model — add your HF token in Settings.'}*`;
+          } else {
+            toast(evt.message, 'error');
+            assistant.content += `\n\n*Error: ${evt.message}*`;
+          }
         }
       }
     } catch (e) {
@@ -557,6 +748,18 @@ function ChatView() {
 
   setTimeout(renderMessages, 0);
 
+  // Generation-controls drawer (per-conversation; falls back to defaults for new chats).
+  const drawer = ChatControlsDrawer(state.currentConv?.id);
+  const slidersBtn = h('button', {
+    class: 'btn btn-ghost icon-btn',
+    title: 'Generation controls',
+    'aria-label': 'Toggle generation controls',
+    onclick: () => {
+      const open = drawer.classList.toggle('open');
+      slidersBtn.classList.toggle('active', open);
+    },
+  }, h('span', { html: ICON.sliders }));
+
   return h('main', { class: 'main' },
     h('header', { class: 'topbar' },
       h('div', { class: 'topbar-title' },
@@ -564,10 +767,14 @@ function ChatView() {
         ModelPicker(),
       ),
       h('div', { class: 'topbar-meta' },
+        slidersBtn,
         ThemeToggle(),
       ),
     ),
-    messagesEl,
+    h('div', { class: 'chat-body' },
+      messagesEl,
+      drawer,
+    ),
     h('footer', { class: 'composer' },
       h('div', { class: 'composer-inner' }, input, sendBtn),
     ),
@@ -606,56 +813,34 @@ function ModelsView() {
   const dlMs = (m) => m.downloaded_at ? Date.parse(m.downloaded_at + 'Z') : 0;
   const isNew = (m) => m.installed && dlMs(m) > 0 && (now - dlMs(m)) < NEW_WINDOW_MS;
 
-  const sorted = state.catalog.slice().sort((a, b) => {
-    // 1) Anything freshly downloaded floats to the very top, newest first
-    //    (covers both curated and custom — that's the "new" badge tier).
-    const an = isNew(a), bn = isNew(b);
-    if (an !== bn) return an ? -1 : 1;
-    if (an && bn)  return dlMs(b) - dlMs(a);
-    // 2) User-added (custom) installed models always sit above the curated
-    //    catalog, newest install first.
-    const ac = !!a.custom, bc = !!b.custom;
-    if (ac !== bc) return ac ? -1 : 1;
-    if (ac && bc)  return dlMs(b) - dlMs(a);
-    // 3) Curated entries keep their declared order from catalog.py.
-    return 0;
-  });
+  const sorted = state.catalog.slice();   // server already orders correctly
 
-  // ---- Grid with seamless infinite scroll ------------------------
-  // The /api/catalog endpoint returns the whole list (small-to-medium), so
-  // this is a pure client-side mount-as-you-scroll pattern: keeps the DOM
-  // light when many custom models accumulate, and stays smooth on resort.
-  const GRID_PAGE = 12;
+  // ---- Grid with seamless server-driven infinite scroll ----------
+  // Mirrors the conversations sidebar pattern: render whatever's in
+  // `state.catalog`, then mount an IntersectionObserver sentinel that
+  // asks the server for the next page when it scrolls into view.
   const grid = h('div', { class: 'grid-3' });
-  let renderedCount = 0;
-  let gridSentinel = null;
-  let gridObserver = null;
-  const appendBatch = () => {
-    const next = sorted.slice(renderedCount, renderedCount + GRID_PAGE);
-    for (const m of next) grid.appendChild(ModelCard(m, { fresh: isNew(m) }));
-    renderedCount += next.length;
-    if (renderedCount >= sorted.length) {
-      if (gridObserver) { gridObserver.disconnect(); gridObserver = null; }
-      if (gridSentinel) { gridSentinel.remove(); gridSentinel = null; }
-    }
-  };
-  appendBatch();   // first page before mount → no flash
+  for (const m of sorted) grid.appendChild(ModelCard(m, { fresh: isNew(m) }));
 
-  if (renderedCount < sorted.length) {
+  let gridSentinel = null;
+  if (!state.catalogExhausted) {
     gridSentinel = h('div', { class: 'scroll-sentinel', 'aria-hidden': 'true' },
       h('div', { class: 'spinner' }));
   }
 
-  // Stand up the IntersectionObserver after the grid+sentinel are in the
-  // DOM. Root is the scrolling .page container; rootMargin pre-loads the
-  // next batch ~200px before the user actually hits the bottom.
   setTimeout(() => {
-    if (!gridSentinel || gridObserver) return;
+    if (!gridSentinel) return;
     const root = grid.closest('.page') || null;
-    gridObserver = new IntersectionObserver((entries) => {
-      if (entries.some((e) => e.isIntersecting)) appendBatch();
-    }, { root, rootMargin: '200px 0px' });
-    gridObserver.observe(gridSentinel);
+    const io = new IntersectionObserver(async (entries) => {
+      if (!entries.some(e => e.isIntersecting)) return;
+      const before = state.catalog.length;
+      await loadMoreCatalog();
+      for (let i = before; i < state.catalog.length; i++) {
+        grid.appendChild(ModelCard(state.catalog[i], { fresh: isNew(state.catalog[i]) }));
+      }
+      if (state.catalogExhausted) { io.disconnect(); gridSentinel.remove(); gridSentinel = null; }
+    }, { root, rootMargin: '240px 0px' });
+    io.observe(gridSentinel);
   }, 0);
   // ----------------------------------------------------------------
 
@@ -695,7 +880,11 @@ function ModelsView() {
         if (evt.event === 'progress') addStatus.textContent = evt.message;
         if (evt.event === 'done')     addStatus.textContent = 'Finalizing…';
         if (evt.event === 'saved')    addStatus.textContent = `Saved (${(evt.size_bytes/1e9).toFixed(2)} GB)`;
-        if (evt.event === 'error')    { toast(evt.message, 'error'); throw new Error(evt.message); }
+        if (evt.event === 'error')    {
+          if (evt.code === 'gated') { showGatedModal({ repoId: evt.repo_id || raw }); throw new Error(evt.message || 'Gated model'); }
+          toast(evt.message, 'error');
+          throw new Error(evt.message);
+        }
       }
       ok = true;
       addInput.value = '';
@@ -869,7 +1058,11 @@ function ModelCard(m, opts = {}) {
         if (evt.event === 'start') progressText.textContent = 'Starting…';
         if (evt.event === 'done') progressText.textContent = 'Finalizing…';
         if (evt.event === 'saved') progressText.textContent = `Saved (${(evt.size_bytes/1e9).toFixed(2)} GB)`;
-        if (evt.event === 'error') { toast(evt.message, 'error'); break; }
+        if (evt.event === 'error') {
+          if (evt.code === 'gated') showGatedModal({ repoId: evt.repo_id || model.repo_id });
+          else toast(evt.message, 'error');
+          break;
+        }
       }
       await refreshCatalog(); render();
       toast(`${model.display_name} ready`, 'success');
@@ -1089,6 +1282,504 @@ function TrainView() {
 }
 
 // =================================================================
+// SETTINGS
+// =================================================================
+async function loadSettings() {
+  state.settingsLoading = true;
+  try { state.settings = await api.get('/api/settings'); }
+  finally { state.settingsLoading = false; }
+}
+
+function SettingsView() {
+  const wrap = h('main', { class: 'main' },
+    h('div', { class: 'page' },
+      h('div', { class: 'page-inner' },
+        h('div', { class: 'page-header' },
+          h('div', {},
+            h('h1', {}, 'Settings'),
+            h('p', {}, 'Configure PocketLM. Secrets are encrypted at rest and never shown after saving.'),
+          ),
+          ThemeToggle(),
+        ),
+        state.settingsLoading || !state.settings
+          ? h('div', { class: 'card' }, h('div', { class: 'spinner' }))
+          : SettingsForm(state.settings),
+      ),
+    ),
+  );
+  if (!state.settings && !state.settingsLoading) {
+    loadSettings().then(() => { if (state.view === 'settings') render(); });
+  }
+  return wrap;
+}
+
+function SettingsForm(data) {
+  const mask = data.mask || '••••••••';
+  const statusBadge = h('span', { class: 'autosave-badge', 'aria-live': 'polite' }, 'All changes saved');
+
+  // Debounced auto-save: coalesce rapid edits (typing) into one PUT.
+  let timer = null;
+  const pending = {};
+  function flagDirty() {
+    statusBadge.textContent = 'Saving…';
+    statusBadge.classList.remove('saved'); statusBadge.classList.add('saving');
+  }
+  function flagSaved() {
+    statusBadge.textContent = 'Saved';
+    statusBadge.classList.remove('saving'); statusBadge.classList.add('saved');
+  }
+  function schedule(key, value) {
+    pending[key] = value;
+    flagDirty();
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(flush, 500);
+  }
+  async function flush() {
+    timer = null;
+    if (Object.keys(pending).length === 0) return;
+    const payload = { ...pending };
+    Object.keys(pending).forEach(k => delete pending[k]);
+    try {
+      const resp = await fetch('/api/settings', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ values: payload }),
+      });
+      if (!resp.ok) throw new Error(await resp.text());
+      flagSaved();
+    } catch (e) {
+      statusBadge.textContent = 'Save failed';
+      statusBadge.classList.remove('saving', 'saved'); statusBadge.classList.add('error');
+      toast('Save failed: ' + e.message, 'error');
+    }
+  }
+
+  const renderField = (item) => {
+    let control;
+    const id = 'set_' + item.key;
+    const initialValue = item.value ?? '';
+    if (item.type === 'select') {
+      control = h('select', { class: 'input', id },
+        ...item.options.map(opt =>
+          h('option', { value: opt, selected: String(opt) === String(initialValue) ? '' : false }, opt)
+        ),
+      );
+      control.onchange = () => schedule(item.key, control.value);
+    } else if (item.type === 'toggle') {
+      const sw = h('label', { class: 'switch' },
+        h('input', { type: 'checkbox', id }),
+        h('span', { class: 'switch-track' }),
+      );
+      const inp = sw.querySelector('input');
+      inp.checked = !!initialValue;
+      inp.onchange = () => schedule(item.key, inp.checked);
+      control = sw;
+    } else if (item.type === 'number') {
+      control = h('input', { class: 'input', type: 'number', id, value: initialValue === null ? '' : initialValue });
+      control.oninput = () => schedule(item.key, control.value);
+    } else if (item.type === 'password') {
+      const inp = h('input', { class: 'input secret-input', type: 'password', id,
+        placeholder: item.has_value ? mask : 'Not set',
+        value: '',
+        autocomplete: 'new-password',
+      });
+      const eyeBtn = h('button', { type: 'button', class: 'btn-ghost icon-btn eye', title: 'Show/hide',
+        onclick: () => { inp.type = inp.type === 'password' ? 'text' : 'password'; },
+        html: ICON.eye,
+      });
+      const clearBtn = h('button', { type: 'button', class: 'btn btn-ghost',
+        onclick: async () => {
+          inp.value = ''; inp.placeholder = 'Not set';
+          schedule(item.key, '');
+        },
+      }, 'Clear');
+      inp.oninput = () => schedule(item.key, inp.value);
+      const extras = [eyeBtn, clearBtn];
+      if (item.key === 'HF_TOKEN') {
+        extras.push(h('button', { type: 'button', class: 'btn btn-outline',
+          onclick: async () => {
+            // Flush any pending typing so the test reflects what's stored.
+            if (timer) { clearTimeout(timer); await flush(); }
+            try {
+              const r = await api.post('/api/settings/test-hf-token', { token: inp.value || undefined });
+              toast(`✓ Authenticated as ${r.user}`, 'success');
+            } catch (e) {
+              let msg = e.message || 'Token rejected';
+              try { msg = (JSON.parse(msg).detail) || msg; } catch {}
+              toast(msg, 'error');
+            }
+          },
+        }, 'Test'));
+      }
+      control = h('div', { class: 'secret-row' }, inp, ...extras);
+    } else {
+      control = h('input', { class: 'input', type: 'text', id, value: initialValue ?? '' });
+      control.oninput = () => schedule(item.key, control.value);
+    }
+
+    const meta = [];
+    if (item.env_present) meta.push(h('span', { class: 'chip' }, 'from .env'));
+    if (item.has_value && item.secret) meta.push(h('span', { class: 'chip success' }, 'stored'));
+    if (item.restart_required) meta.push(h('span', { class: 'chip warn' }, 'restart required'));
+
+    const focus = state.settingsFocusKey === item.key;
+    const row = h('div', { class: 'setting-row' + (focus ? ' focus-target' : '') },
+      h('div', { class: 'setting-label' },
+        h('label', { class: 'label', for: id }, item.label),
+        item.description ? h('div', { class: 'hint' }, item.description) : null,
+        meta.length ? h('div', { class: 'chips', style: { marginTop: '6px' } }, ...meta) : null,
+      ),
+      h('div', { class: 'setting-control' }, control),
+    );
+    if (focus) {
+      requestAnimationFrame(() => {
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const f = row.querySelector('input,select,textarea');
+        if (f) f.focus();
+        state.settingsFocusKey = null;
+      });
+    }
+    return row;
+  };
+
+  return h('div', {},
+    h('div', { class: 'settings-status' }, statusBadge),
+    ...data.categories.map(cat => h('section', { class: 'settings-cat' },
+      h('h2', { class: 'settings-cat-title' }, cat.name),
+      h('div', { class: 'card settings-grid' },
+        ...cat.items.map(renderField),
+      ),
+    )),
+  );
+}
+
+// =================================================================
+// AGENT
+// =================================================================
+async function loadMCPServers() {
+  try {
+    state.mcpServers = await api.get('/api/agent/servers');
+  } catch (e) {
+    state.mcpServers = [];
+    toast('Failed to load MCP servers: ' + e.message, 'error');
+  } finally {
+    state.mcpServersLoaded = true;
+  }
+}
+
+function AgentView() {
+  const wrap = h('main', { class: 'main' },
+    h('div', { class: 'page' },
+      h('div', { class: 'page-inner' },
+        h('div', { class: 'page-header' },
+          h('div', {},
+            h('h1', {}, 'Agent'),
+            h('p', {}, 'Let your local model use MCP tools. Connect to a Model Context Protocol server, pick which servers to expose, and chat.'),
+          ),
+          ThemeToggle(),
+        ),
+        state.mcpServersLoaded
+          ? AgentBody()
+          : h('div', { class: 'card' }, h('div', { class: 'spinner' })),
+      ),
+    ),
+  );
+  if (!state.mcpServersLoaded) {
+    loadMCPServers().then(() => { if (state.view === 'agent') render(); });
+  }
+  return wrap;
+}
+
+function AgentBody() {
+  const left = h('div', { class: 'agent-left' });
+  const right = h('div', { class: 'agent-right' });
+
+  // ---- Server list / CRUD ----
+  const header = h('div', { class: 'agent-section-head' },
+    h('h3', {}, 'MCP servers'),
+    h('button', { class: 'btn btn-primary',
+      onclick: () => openMCPEditor(null, async () => { await loadMCPServers(); render(); }),
+    }, h('span', { html: ICON.plus }), 'Add server'),
+  );
+  left.appendChild(header);
+
+  if (state.mcpServers.length === 0) {
+    left.appendChild(h('div', { class: 'card empty-hint' }, 'No MCP servers yet. Add one to enable tool use.'));
+  } else {
+    for (const srv of state.mcpServers) left.appendChild(MCPServerCard(srv));
+  }
+
+  // ---- Agent chat ----
+  const messagesEl = h('div', { class: 'agent-messages' });
+  const renderAgentMessages = () => {
+    messagesEl.innerHTML = '';
+    if (state.agentMessages.length === 0) {
+      messagesEl.appendChild(h('div', { class: 'empty-hint' },
+        'Pick one or more enabled servers on the left, then ask a question that needs a tool.'));
+      return;
+    }
+    for (const m of state.agentMessages) messagesEl.appendChild(AgentBubble(m));
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  };
+
+  const input = h('textarea', { class: 'input', rows: 2, placeholder: 'Ask the agent…',
+    onkeydown: (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } } });
+
+  const sendBtn = h('button', { class: 'btn btn-primary',
+    onclick: () => state.agentGenerating ? stop() : send(),
+  }, h('span', { html: ICON.send }), 'Send');
+
+  function stop() {
+    if (state.agentAbortCtl) { try { state.agentAbortCtl.abort(); } catch {} }
+  }
+
+  async function send() {
+    const text = input.value.trim();
+    if (!text || state.agentGenerating) return;
+    if (!state.selectedModel) { toast('Pick a model first', 'error'); return; }
+    const serverIds = state.mcpServers.filter(s => state.agentSelectedServerIds.includes(s.id) && s.enabled).map(s => s.id);
+    if (serverIds.length === 0) { toast('Select at least one enabled MCP server', 'error'); return; }
+    state.agentMessages.push({ role: 'user', content: text });
+    const assistant = { role: 'assistant', content: '', events: [] };
+    state.agentMessages.push(assistant);
+    input.value = ''; renderAgentMessages();
+    state.agentGenerating = true; state.agentAbortCtl = new AbortController();
+    sendBtn.innerHTML = ''; sendBtn.append(h('span', { html: ICON.stop }), 'Stop');
+    try {
+      for await (const evt of api.stream('/api/agent/chat', {
+        model_id: state.selectedModel,
+        message: text,
+        server_ids: serverIds,
+      }, { signal: state.agentAbortCtl.signal })) {
+        if (evt.event === 'token') {
+          assistant.content += (assistant.content ? '\n\n' : '') + evt.text;
+        } else if (evt.event === 'tool_call' || evt.event === 'tool_result' || evt.event === 'tool_error') {
+          assistant.events.push(evt);
+        } else if (evt.event === 'error') {
+          toast(evt.message, 'error');
+          assistant.content += `\n\n*Error: ${evt.message}*`;
+        }
+        renderAgentMessages();
+      }
+    } catch (e) {
+      if (e.name !== 'AbortError') toast(e.message, 'error');
+    } finally {
+      state.agentGenerating = false; state.agentAbortCtl = null;
+      sendBtn.innerHTML = ''; sendBtn.append(h('span', { html: ICON.send }), 'Send');
+    }
+  }
+
+  right.append(
+    h('div', { class: 'agent-section-head' },
+      h('h3', {}, 'Chat'),
+      ModelPicker(),
+    ),
+    messagesEl,
+    h('div', { class: 'agent-composer' }, input, sendBtn),
+  );
+  setTimeout(renderAgentMessages, 0);
+
+  return h('div', { class: 'agent-grid' }, left, right);
+}
+
+function AgentBubble(m) {
+  const isUser = m.role === 'user';
+  const body = h('div', { class: 'bubble' });
+  if (m.events && m.events.length) {
+    for (const ev of m.events) {
+      if (ev.event === 'tool_call') {
+        body.appendChild(h('div', { class: 'tool-card' },
+          h('div', { class: 'tool-head' }, h('strong', {}, 'tool_call'), h('code', {}, ev.name)),
+          h('pre', { class: 'tool-json' }, JSON.stringify(ev.arguments || {}, null, 2)),
+        ));
+      } else if (ev.event === 'tool_result') {
+        body.appendChild(h('div', { class: 'tool-card ok' },
+          h('div', { class: 'tool-head' }, h('strong', {}, 'tool_result'), h('code', {}, ev.name)),
+          h('pre', { class: 'tool-json' }, JSON.stringify(ev.result || {}, null, 2)),
+        ));
+      } else if (ev.event === 'tool_error') {
+        body.appendChild(h('div', { class: 'tool-card err' },
+          h('div', { class: 'tool-head' }, h('strong', {}, 'tool_error'), h('code', {}, ev.server_name || '')),
+          h('pre', { class: 'tool-json' }, ev.error || ''),
+        ));
+      }
+    }
+  }
+  const md = h('div', { class: 'md' });
+  setMd(md, m.content || (isUser ? '' : '…'));
+  body.appendChild(md);
+  return h('div', { class: `msg-wrap ${isUser ? 'user' : ''}` },
+    h('div', { class: `avatar ${isUser ? 'user' : 'ai'}` }, isUser ? 'You' : 'AI'),
+    h('div', { class: 'msg-col' }, body),
+  );
+}
+
+function MCPServerCard(srv) {
+  const checked = state.agentSelectedServerIds.includes(srv.id);
+  const cb = h('input', { type: 'checkbox' });
+  cb.checked = checked;
+  cb.onchange = () => {
+    if (cb.checked) {
+      if (!state.agentSelectedServerIds.includes(srv.id)) state.agentSelectedServerIds.push(srv.id);
+    } else {
+      state.agentSelectedServerIds = state.agentSelectedServerIds.filter(x => x !== srv.id);
+    }
+  };
+  return h('div', { class: 'card mcp-card' + (srv.enabled ? '' : ' disabled') },
+    h('div', { class: 'mcp-head' },
+      h('label', { class: 'mcp-check' }, cb,
+        h('div', {},
+          h('div', { class: 'mcp-name' }, srv.name),
+          h('div', { class: 'model-repo' }, `${srv.transport} · ${srv.url || srv.command || '(unconfigured)'}`),
+        ),
+      ),
+      h('div', { class: 'mcp-actions' },
+        h('button', { class: 'btn btn-outline',
+          onclick: async () => {
+            try {
+              const r = await api.get(`/api/agent/servers/${srv.id}/tools`);
+              showModal({
+                title: `Tools — ${srv.name}`,
+                body: h('div', {}, r.tools.length === 0
+                  ? h('p', { class: 'hint' }, 'No tools advertised.')
+                  : h('ul', { class: 'tool-list' }, ...r.tools.map(t =>
+                      h('li', {}, h('code', {}, t.name), ' — ', t.description || h('em', {}, 'no description'))))),
+                actions: [{ label: 'Close', kind: 'btn-primary' }],
+              });
+            } catch (e) { toast('List tools failed: ' + e.message, 'error'); }
+          },
+        }, 'Tools'),
+        h('button', { class: 'btn btn-outline',
+          onclick: () => openMCPEditor(srv, async () => { await loadMCPServers(); render(); }),
+        }, 'Edit'),
+        h('button', { class: 'btn btn-outline',
+          onclick: async () => {
+            if (!confirm(`Delete server "${srv.name}"?`)) return;
+            await api.del(`/api/agent/servers/${srv.id}`);
+            await loadMCPServers(); render();
+          },
+        }, h('span', { html: ICON.trash })),
+      ),
+    ),
+  );
+}
+
+function openMCPEditor(srv, onSaved) {
+  const isNew = !srv;
+  const form = {
+    name: srv?.name || '',
+    transport: srv?.transport || 'http',
+    url: srv?.url || '',
+    command: srv?.command || '',
+    args: (srv?.args || []).join(' '),
+    enabled: srv ? !!srv.enabled : true,
+    headers: { ...(srv?.headers || {}) },
+  };
+  const headersContainer = h('div', { class: 'kv-list' });
+  function renderHeaders() {
+    headersContainer.innerHTML = '';
+    const entries = Object.entries(form.headers);
+    if (entries.length === 0) {
+      headersContainer.appendChild(h('div', { class: 'hint' }, 'No custom headers.'));
+    }
+    for (const [k, v] of entries) {
+      const ki = h('input', { class: 'input', type: 'text', value: k, placeholder: 'Header' });
+      const vi = h('input', { class: 'input', type: 'text', value: v, placeholder: 'Value' });
+      const row = h('div', { class: 'kv-row' }, ki, vi,
+        h('button', { class: 'btn btn-ghost', onclick: () => { delete form.headers[k]; renderHeaders(); } }, '×'));
+      ki.onchange = () => {
+        const newK = ki.value.trim();
+        if (!newK || newK === k) return;
+        form.headers[newK] = form.headers[k]; delete form.headers[k]; renderHeaders();
+      };
+      vi.oninput = () => { form.headers[ki.value.trim() || k] = vi.value; };
+      headersContainer.appendChild(row);
+    }
+  }
+  renderHeaders();
+
+  const nameI = h('input', { class: 'input', value: form.name, placeholder: 'My MCP server' });
+  nameI.oninput = () => { form.name = nameI.value; };
+  const transportI = h('select', { class: 'input' },
+    ...['http', 'sse', 'stdio'].map(t => h('option', { value: t, selected: form.transport === t ? '' : false }, t)));
+  transportI.onchange = () => { form.transport = transportI.value; toggleFields(); };
+  const urlI = h('input', { class: 'input', value: form.url, placeholder: 'https://example.com/mcp' });
+  urlI.oninput = () => { form.url = urlI.value; };
+  const cmdI = h('input', { class: 'input', value: form.command, placeholder: '/usr/bin/python' });
+  cmdI.oninput = () => { form.command = cmdI.value; };
+  const argsI = h('input', { class: 'input', value: form.args, placeholder: '-m mypkg.server --flag' });
+  argsI.oninput = () => { form.args = argsI.value; };
+  const enabledI = h('label', { class: 'switch' }, h('input', { type: 'checkbox' }), h('span', { class: 'switch-track' }));
+  enabledI.querySelector('input').checked = form.enabled;
+  enabledI.querySelector('input').onchange = (e) => { form.enabled = e.target.checked; };
+
+  const urlRow = h('div', { class: 'setting-row' },
+    h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'URL'),
+      h('div', { class: 'hint' }, 'For http/sse transports.')), h('div', { class: 'setting-control' }, urlI));
+  const cmdRow = h('div', { class: 'setting-row' },
+    h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Command'),
+      h('div', { class: 'hint' }, 'For stdio transport.')), h('div', { class: 'setting-control' }, cmdI));
+  const argsRow = h('div', { class: 'setting-row' },
+    h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Args'),
+      h('div', { class: 'hint' }, 'Space-separated, for stdio.')), h('div', { class: 'setting-control' }, argsI));
+
+  function toggleFields() {
+    const isStdio = form.transport === 'stdio';
+    urlRow.style.display = isStdio ? 'none' : '';
+    cmdRow.style.display = isStdio ? '' : 'none';
+    argsRow.style.display = isStdio ? '' : 'none';
+  }
+
+  const body = h('div', { class: 'settings-grid' },
+    h('div', { class: 'setting-row' },
+      h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Name')),
+      h('div', { class: 'setting-control' }, nameI)),
+    h('div', { class: 'setting-row' },
+      h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Transport')),
+      h('div', { class: 'setting-control' }, transportI)),
+    urlRow, cmdRow, argsRow,
+    h('div', { class: 'setting-row' },
+      h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Headers'),
+        h('div', { class: 'hint' }, 'Sent on http/sse requests. Values are encrypted at rest.')),
+      h('div', { class: 'setting-control' }, headersContainer,
+        h('button', { class: 'btn btn-outline', style: { marginTop: '8px' },
+          onclick: () => { form.headers[''] = ''; renderHeaders(); } },
+          h('span', { html: ICON.plus }), 'Add header'))),
+    h('div', { class: 'setting-row' },
+      h('div', { class: 'setting-label' }, h('label', { class: 'label' }, 'Enabled')),
+      h('div', { class: 'setting-control' }, enabledI)),
+  );
+  toggleFields();
+
+  showModal({
+    title: isNew ? 'Add MCP server' : `Edit — ${srv.name}`,
+    body,
+    actions: [
+      { label: 'Cancel', kind: 'btn-outline' },
+      { label: isNew ? 'Add' : 'Save', kind: 'btn-primary', onclick: async () => {
+        const payload = {
+          name: form.name, transport: form.transport, url: form.url,
+          command: form.command,
+          args: (form.args || '').split(/\s+/).filter(Boolean),
+          headers: Object.fromEntries(Object.entries(form.headers).filter(([k]) => k.trim())),
+          enabled: form.enabled,
+        };
+        try {
+          if (isNew) await api.post('/api/agent/servers', payload);
+          else {
+            const r = await fetch(`/api/agent/servers/${srv.id}`, {
+              method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload),
+            });
+            if (!r.ok) throw new Error(await r.text());
+          }
+          toast(isNew ? 'Server added' : 'Server saved', 'success');
+          if (onSaved) await onSaved();
+        } catch (e) { toast(e.message, 'error'); }
+      }},
+    ],
+  });
+}
+
+// =================================================================
 // ROUTER
 // =================================================================
 function navigate(view) { state.view = view; render(); }
@@ -1102,21 +1793,24 @@ function renderSidebar() {
 
 function render() {
   const root = $('#app');
-  // Preserve the .page scroll position across full re-renders so that
-  // actions like "delete model" don't yank the user back to the top.
+  // Preserve .page scroll only when re-rendering the SAME view.
   const prevPage = root.querySelector('.page');
   const prevScroll = prevPage ? prevPage.scrollTop : 0;
+  const prevView = state._lastRenderedView || null;
   root.innerHTML = '';
   root.appendChild(Sidebar());
   let view;
   if (state.view === 'models') view = ModelsView();
   else if (state.view === 'train') view = TrainView();
+  else if (state.view === 'settings') view = SettingsView();
+  else if (state.view === 'agent') view = AgentView();
   else view = ChatView();
   root.appendChild(view);
-  if (prevScroll) {
+  if (prevScroll && prevView === state.view) {
     const newPage = root.querySelector('.page');
     if (newPage) newPage.scrollTop = prevScroll;
   }
+  state._lastRenderedView = state.view;
 }
 
 (async () => {
@@ -1128,4 +1822,6 @@ function render() {
   }
   render();
 })();
+
+
 

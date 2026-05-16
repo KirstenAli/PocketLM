@@ -23,9 +23,19 @@ def _open_browser(url: str, delay: float = 1.2) -> None:
 
 def main() -> None:
     load_dotenv()
-    host = os.getenv("POCKETLM_HOST", "127.0.0.1")
-    port = int(os.getenv("POCKETLM_PORT", "8000"))
-    no_browser = os.getenv("POCKETLM_NO_BROWSER") == "1"
+    # Initialize DB early so settings_store can be consulted for host/port.
+    try:
+        from .db import init_db
+        init_db()
+    except Exception:
+        pass
+    from .config import get_host, get_port
+    host = get_host()
+    port = get_port()
+    no_browser = (
+        os.getenv("POCKETLM_NO_BROWSER") == "1"
+        or bool(_settings_no_browser())
+    )
 
     if not no_browser:
         _open_browser(f"http://{host}:{port}")
@@ -37,6 +47,14 @@ def main() -> None:
         log_level="info",
         reload=False,
     )
+
+
+def _settings_no_browser() -> bool:
+    try:
+        from .services import settings_store
+        return bool(settings_store.get_effective("POCKETLM_NO_BROWSER"))
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

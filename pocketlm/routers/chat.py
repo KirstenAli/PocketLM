@@ -12,6 +12,7 @@ from sse_starlette.sse import EventSourceResponse
 from ..db import session_scope
 from ..models_schema import Conversation, Message
 from ..schemas import ChatRequest
+from ..services.errors import GatedModelError
 from ..services.inference import stream_chat
 
 router = APIRouter()
@@ -58,7 +59,14 @@ async def chat(req: ChatRequest):
                 history,
                 temperature=req.temperature,
                 top_p=req.top_p,
+                top_k=req.top_k,
+                repetition_penalty=req.repetition_penalty,
                 max_new_tokens=req.max_new_tokens,
+                min_new_tokens=req.min_new_tokens,
+                do_sample=req.do_sample,
+                num_beams=req.num_beams,
+                seed=req.seed,
+                stop_sequences=req.stop_sequences,
                 stop_event=stop_event,
             ):
                 full.append(chunk)
@@ -74,7 +82,11 @@ async def chat(req: ChatRequest):
             saved = True
             yield {"data": json.dumps({"event": "done"})}
         except Exception as e:  # noqa: BLE001
-            yield {"data": json.dumps({"event": "error", "message": str(e)})}
+            payload = {"event": "error", "message": str(e)}
+            if isinstance(e, GatedModelError):
+                payload["code"] = "gated"
+                payload["repo_id"] = e.repo_id
+            yield {"data": json.dumps(payload)}
         finally:
             # Stop the worker thread if still running.
             stop_event.set()
