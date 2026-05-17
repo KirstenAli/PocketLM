@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
 from sqlmodel import select
 from sse_starlette.sse import EventSourceResponse
 
 from ..db import session_scope
-from ..models_schema import MCPServer
+from ..models_schema import Conversation, MCPServer, Message
 from ..schemas import AgentChatRequest, MCPServerIn, MCPServerOut
 from ..services import agent_loop, mcp_client
 
@@ -109,7 +110,20 @@ async def list_tools(sid: int):
 
 @router.post("/agent/chat")
 async def agent_chat(req: AgentChatRequest):
+    if req.conversation_id is not None:
+        with session_scope() as s:
+            conv = s.get(Conversation, req.conversation_id)
+            if not conv:
+                raise HTTPException(404, "Conversation not found")
+            # Persist the user message immediately for consistent history.
+            s.add(Message(conversation_id=conv.id, role="user", content=req.message))
+            conv.model_id = req.model_id
+            conv.updated_at = datetime.utcnow()
+            s.add(conv)
+            s.commit()
+
     async def gen():
+        full = []
         try:
             async for evt in agent_loop.run_agent(
                 req.model_id,
@@ -121,9 +135,22 @@ async def agent_chat(req: AgentChatRequest):
                 top_p=req.top_p,
                 max_new_tokens=req.max_new_tokens,
             ):
+                if evt.get("event") == "token":
+                    full.append(evt.get("text", ""))
                 yield {"data": json.dumps(evt)}
         except Exception as e:  # noqa: BLE001
             yield {"data": json.dumps({"event": "error", "message": str(e)})}
+        finally:
+            if req.conversation_id is not None:
+                text = "".join(full).strip()
+                if text:
+                    with session_scope() as s:
+                        s.add(Message(conversation_id=req.conversation_id, role="assistant", content=text))
+                        conv = s.get(Conversation, req.conversation_id)
+                        if conv:
+                            conv.updated_at = datetime.utcnow()
+                            s.add(conv)
+                        s.commit()
 
     return EventSourceResponse(gen())
 

@@ -127,3 +127,29 @@ def test_builtin_tools_rejects_empty_command():
         assert False, "expected ValueError"
     except ValueError as e:
         assert "required" in str(e)
+
+
+def test_agent_chat_persists_conversation_history(client, monkeypatch):
+    from pocketlm.services import agent_loop
+
+    async def _fake_run_agent(*args, **kwargs):
+        yield {"event": "start", "tools": []}
+        yield {"event": "token", "text": "agent reply"}
+        yield {"event": "done"}
+
+    monkeypatch.setattr(agent_loop, "run_agent", _fake_run_agent)
+
+    conv = client.post("/api/conversations", json={"model_id": "owner/tiny", "title": "Agent test"}).json()
+    r = client.post("/api/agent/chat", json={
+        "conversation_id": conv["id"],
+        "model_id": "owner/tiny",
+        "message": "hello from agent",
+        "server_ids": [],
+    })
+    assert r.status_code == 200
+
+    msgs = client.get(f"/api/conversations/{conv['id']}/messages?limit=10").json()
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[0]["content"] == "hello from agent"
+    assert msgs[1]["content"] == "agent reply"
+

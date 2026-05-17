@@ -254,6 +254,7 @@ function resetChatState() {
   state.abortCtl = null;
   state.currentConv = null;
   state.messages = [];
+  state.agentMessages = [];
   state.msgsExhausted = false;
   state.msgsLoading = false;
   state.generating = false;
@@ -761,6 +762,17 @@ function ChatView() {
     const text = input.value.trim();
     if (!text || state.generating) return;
     if (!state.selectedModel) { toast('Pick a model first', 'error'); return; }
+
+    // Reuse the same conversation history model as regular chat.
+    if (!state.currentConv) {
+      state.messages = [];
+      const c = await api.post('/api/conversations', { model_id: state.selectedModel, title: text.slice(0, 60) });
+      state.currentConv = c;
+      await refreshConversations();
+      renderSidebar();
+    }
+
+    const convAtSend = state.currentConv;
     await ensureMCPServersLoaded();
     const serverIds = state.mcpServers
       .filter(s => state.agentSelectedServerIds.includes(s.id) && s.enabled)
@@ -779,6 +791,7 @@ function ChatView() {
     const cfg = chatCfgPayload(getChatCfg(null));
     try {
       for await (const evt of api.stream('/api/agent/chat', {
+        conversation_id: convAtSend.id,
         model_id: state.selectedModel,
         message: text,
         server_ids: serverIds,
@@ -814,6 +827,8 @@ function ChatView() {
       state.generating = false;
       state.abortCtl = null;
       setSendBtn('send');
+      await refreshConversations();
+      renderSidebar();
       renderMessages();
     }
   }
@@ -913,6 +928,7 @@ async function openConversation(id) {
   state.selectedModel = conv.model_id || state.selectedModel;
   // Latest page only; older messages stream in as the user scrolls up.
   state.messages = await api.get(`/api/conversations/${id}/messages?limit=${PAGE_SIZE}`);
+  state.agentMessages = state.messages.map(m => ({ role: m.role, content: m.content }));
   state.msgsExhausted = state.messages.length < PAGE_SIZE;
   state.view = 'chat';
   render();

@@ -105,6 +105,7 @@ class MCPServerOut(BaseModel):
 
 
 class AgentChatRequest(BaseModel):
+    conversation_id: Optional[int] = None
     model_id: str
     message: str
     server_ids: list[int] = Field(default_factory=list)
